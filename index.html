@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
+  <meta name="theme-color" content="#0E0F13" />
+  <meta name="description" content="像刷短视频一样背六级单词：一屏一词，上下滑，先自测再翻面。" />
+  <meta name="format-detection" content="telephone=no" />
+  <title>刷六级 · 一屏一词</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body data-fs="m">
+
+  <!-- 顶部：进度条 + 今日计数 -->
+  <header class="topbar">
+    <div class="progress"><div class="progress__fill" id="progressFill"></div></div>
+    <div class="topbar__row">
+      <span id="dayLabel">今天</span>
+      <span id="countLabel">0 / 0</span>
+      <button class="gear" id="gearBtn" aria-label="设置">⚙︎</button>
+    </div>
+  </header>
+
+  <!-- 卡片流：所有卡片由 app.js 生成 -->
+  <main class="feed" id="feed" aria-live="polite"></main>
+
+  <!-- 底部三键 -->
+  <footer class="actionbar">
+    <div class="hintline" id="keyHint">先点卡片看释义，再评分</div>
+    <div class="keys is-locked" id="keys">
+      <button class="key key--again" data-rating="again" disabled>忘了</button>
+      <button class="key key--hard" data-rating="hard" disabled>模糊</button>
+      <button class="key key--good" data-rating="good" disabled>记得</button>
+    </div>
+  </footer>
+
+  <!-- 今日完成 -->
+  <div class="screen done" id="doneScreen" hidden>
+    <div class="done__inner">
+      <div class="done__badge">✓</div>
+      <h1 class="done__title">今天的词刷完了</h1>
+      <div class="done__grid">
+        <div><b id="doneCount">0</b><span>今日张数</span></div>
+        <div><b id="doneStreak">0</b><span>连续天数</span></div>
+        <div><b id="doneDue">0</b><span>明天复习</span></div>
+      </div>
+      <p class="done__tip" id="doneTip"></p>
+      <button class="btn btn--primary" id="moreBtn">再学 20 个新词</button>
+      <button class="btn" id="closeDone">先休息</button>
+      <p class="done__small">进度只存在这台手机里，记得每周导出一次备份</p>
+    </div>
+  </div>
+
+  <!-- 设置 -->
+  <div class="screen sheet" id="settings" hidden>
+    <div class="sheet__panel" role="dialog" aria-label="设置">
+      <div class="sheet__head">
+        <b>设置</b>
+        <button class="sheet__close" id="closeSettings">完成</button>
+      </div>
+
+      <div class="field" data-setting="dailyNew">
+        <label>每日新词（明天生效）</label>
+        <div class="seg">
+          <button class="seg__btn" data-value="10">10</button>
+          <button class="seg__btn" data-value="20">20</button>
+          <button class="seg__btn" data-value="30">30</button>
+          <button class="seg__btn" data-value="40">40</button>
+        </div>
+      </div>
+
+      <div class="field" data-setting="fontSize">
+        <label>字号</label>
+        <div class="seg">
+          <button class="seg__btn" data-value="s">小</button>
+          <button class="seg__btn" data-value="m">中</button>
+          <button class="seg__btn" data-value="l">大</button>
+        </div>
+      </div>
+
+      <div class="field field--row">
+        <button class="btn" id="exportBtn">导出进度备份</button>
+        <button class="btn" id="importBtn">导入备份</button>
+      </div>
+
+      <div class="field">
+        <button class="btn btn--danger" id="resetBtn">清空全部进度</button>
+      </div>
+
+      <p class="sheet__tip">
+        iPhone 长时间不打开网页时，系统可能清理本地存储。每周导出一次备份，换手机也能接着背。
+      </p>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+  <input type="file" id="importFile" accept="application/json,.json" hidden />
+
+  <script src="words.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
