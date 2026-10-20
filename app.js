@@ -66,7 +66,7 @@ function markStudy(state, today) {
 /* ---------------- 队列 ---------------- */
 function buildQueue(words, state, today, dailyNew) {
   const due = [];
-  const fresh = [];
+  let fresh = [];
   for (let i = 0; i < words.length; i++) {
     const w = words[i];
     const p = state.words[w.id];
@@ -79,6 +79,13 @@ function buildQueue(words, state, today, dailyNew) {
     return (b.stage || 0) - (a.stage || 0);
   });
   fresh.sort(function (a, b) { return (a.rank || 0) - (b.rank || 0); });
+
+  // 「滑过去不算」：从上次刷到的位置继续，不用每次从头再来
+  const cursor = Number(state.stats && state.stats.cursorRank) || 0;
+  if (cursor > 0 && fresh.length) {
+    const after = fresh.filter(function (w) { return (w.rank || 0) > cursor; });
+    fresh = after.length ? after : fresh;
+  }
 
   const out = [];
 
@@ -155,7 +162,8 @@ function defaultState() {
     version: 1,
     updatedAt: '',
     settings: { dailyNew: 0, fontSize: 'm' },  // 0 = 不限
-    stats: { streak: 0, lastStudy: '', lastDay: '', todayTotal: 0 },
+    stats: { streak: 0, lastStudy: '', lastDay: '', todayTotal: 0, cursorRank: 0 },
+    favs: {},
     words: {}
   };
 }
@@ -173,6 +181,7 @@ function loadState() {
       updatedAt: s.updatedAt || '',
       settings: Object.assign({}, d.settings, s.settings || {}),
       stats: Object.assign({}, d.stats, s.stats || {}),
+      favs: (s.favs && typeof s.favs === 'object') ? s.favs : {},
       words: s.words
     };
     // 清洗：坏数据不拖垮整个 App
@@ -189,6 +198,7 @@ function loadState() {
       };
     }
     if (['s', 'm', 'l'].indexOf(out.settings.fontSize) === -1) out.settings.fontSize = 'm';
+    out.stats.cursorRank = Number(out.stats.cursorRank) || 0;
     const dn = Number(out.settings.dailyNew);
     out.settings.dailyNew = (isFinite(dn) && dn >= 0) ? Math.min(500, dn) : 0;
     return out;
@@ -227,6 +237,8 @@ function validateWords(raw) {
       ex: w.ex ? String(w.ex) : '',
       exCn: w.exCn ? String(w.exCn) : '',
       root: w.root ? String(w.root) : '',
+      fam: Array.isArray(w.fam) ? w.fam.map(String).slice(0, 5) : [],
+      sim: Array.isArray(w.sim) ? w.sim.map(String).slice(0, 5) : [],
       lvl: Number(w.lvl) || 1,
       rank: Number(w.rank) || 9999
     });
@@ -258,8 +270,16 @@ function boot() {
     state: null,
     today: '',
     lock: false,
-    toastTimer: 0
+    toastTimer: 0,
+    mode: 'today',
+    senseIndex: null
   };
+
+  let saveTimer = 0;
+  function saveSoon() {
+    if (saveTimer) return;
+    saveTimer = setTimeout(function () { saveTimer = 0; save(); }, 1000);
+  }
 
   const keyBtns = Array.prototype.slice.call(keys.querySelectorAll('.key'));
 
@@ -325,8 +345,43 @@ function boot() {
     } catch (e) { /* 忽略 */ }
   }, { once: true });
 
+  /* ---------- 相关词 ---------- */
+  // 同义：释义里至少一条完全相同的其他词
+  function synonymsOf(w) {
+    if (!model.senseIndex) return [];
+    const seen = Object.create(null);
+    const out = [];
+    w.cn.forEach(function (s) {
+      const arr = model.senseIndex.get(s) || [];
+      for (let i = 0; i < arr.length && out.length < 3; i++) {
+        const x = arr[i];
+        if (x.id === w.id || seen[x.id]) continue;
+        seen[x.id] = 1;
+        out.push(x.w);
+      }
+    });
+    return out;
+  }
+
+  function relRow(k, v) {
+    return '<div class="rel__row"><span class="rel__k">' + k + '</span>' +
+      '<span class="rel__v">' + esc(v.join(' · ')) + '</span></div>';
+  }
+
+  function relHTML(w) {
+    const rows = [];
+    const fam = (w.fam || []).filter(function (x) { return x && x.toLowerCase() !== w.w.toLowerCase(); });
+    if (fam.length) rows.push(relRow('派生', fam));
+    const syn = synonymsOf(w);
+    if (syn.length) rows.push(relRow('同义', syn));
+    const sim = (w.sim || []).filter(Boolean);
+    if (sim.length) rows.push(relRow('形近', sim));
+    if (!rows.length) return '';
+    return '<div class="card__rel">' + rows.join('') + '</div>';
+  }
+
   /* ---------- 渲染 ---------- */
-  function cardHTML(w) {
+  function cardHTML(w, isFav) {
     const svg = '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">' +
       '<path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor"/>' +
       '<path d="M16.5 8.5a5 5 0 0 1 0 7" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/>' +
@@ -337,6 +392,8 @@ function boot() {
         '<div class="card__head">' +
           '<span class="card__word">' + esc(w.w) + '</span>' +
           '<span class="card__flag" aria-hidden="true"></span>' +
+          '<button class="fav' + (isFav ? ' is-on' : '') + '" data-fav="' + esc(w.id) + '" aria-label="收藏">' +
+            (isFav ? '★' : '☆') + '</button>' +
           '<button class="speak" data-speak="' + esc(w.w) + '" aria-label="朗读单词">' + svg + '</button>' +
         '</div>' +
         '<div class="card__ipa">' + esc(w.ipa) + '</div>' +
@@ -346,6 +403,7 @@ function boot() {
         (w.ex ? '<div class="card__ex">' + esc(w.ex) + '</div>' : '') +
         (w.exCn ? '<div class="card__excn">' + esc(w.exCn) + '</div>' : '') +
         (w.root ? '<div class="card__root">' + esc(w.root) + '</div>' : '') +
+        relHTML(w) +
       '</div>';
   }
 
@@ -359,7 +417,7 @@ function boot() {
       const el = document.createElement('article');
       el.className = 'card';
       el.dataset.id = w.id;
-      el.innerHTML = cardHTML(w);
+      el.innerHTML = cardHTML(w, !!(model.state.favs && model.state.favs[w.id]));
       frag.appendChild(el);
       model.cards.push(el);
     }
@@ -369,10 +427,18 @@ function boot() {
 
   /* ---------- 顶部进度 ---------- */
   function updateTop() {
+    dayLabel.textContent = (model.mode === 'fav') ? '收藏夹' : ('今天 · ' + model.today.slice(5).replace('-', '/'));
+    if (model.mode === 'fav') return;
     const done = countDoneToday(model.state, model.today);
     countLabel.textContent = '已刷 ' + done + ' 张';
     progressFill.style.width = Math.min(100, (done / SOFT_GOAL) * 100) + '%';
-    dayLabel.textContent = '今天 · ' + model.today.slice(5).replace('-', '/');
+  }
+
+  function updateFavLabel() {
+    const b = $('favBtn');
+    if (!b) return;
+    const n = Object.keys(model.state.favs || {}).length;
+    b.textContent = n ? '收藏夹（' + n + ' 个词）' : '收藏夹（还没有收藏）';
   }
 
   /* ---------- 三键状态 ---------- */
@@ -421,20 +487,29 @@ function boot() {
     if (next < model.queue.length) {
       if (next >= model.rendered) renderChunk();
       requestAnimationFrame(function () { scrollToIndex(next); });
+    } else if (model.mode === 'fav') {
+      toast('收藏夹到头了，点左上角回到今天');
     } else {
       setTimeout(showDone, 300);
     }
   }
 
   function setActive(next, movingDown) {
-    const prev = model.active;
-    if (movingDown && prev >= 0) {
-      const prevEl = model.cards[prev];
-      // 没翻面就滑过去了 → 记为“模糊”（这就是“刷”的主路径）
-      if (prevEl && !prevEl.classList.contains('is-rated')) applyRate(prevEl, 'hard');
-    }
     model.active = next;
+    // 「滑过去不算」：只把浏览位置记下来，不写学习记录
+    if (model.mode === 'today') trackCursor();
     updateKeys();
+  }
+
+  function trackCursor() {
+    const el = model.cards[model.active];
+    if (!el || el.classList.contains('is-rated')) return;
+    const w = model.byId[el.dataset.id];
+    if (!w) return;
+    if (!model.state.words[w.id] && (w.rank || 0) > (model.state.stats.cursorRank || 0)) {
+      model.state.stats.cursorRank = w.rank || 0;
+      saveSoon();
+    }
   }
 
   let ticking = false;
@@ -450,6 +525,56 @@ function boot() {
       if (idx !== model.active) setActive(idx, idx > model.active);
       if (idx + 6 >= model.rendered && model.rendered < model.queue.length) renderChunk();
     });
+  }
+
+  /* ---------- 收藏 ---------- */
+  function toggleFav(btn) {
+    const id = btn.dataset.fav;
+    if (!id) return;
+    model.state.favs = model.state.favs || {};
+    const on = !model.state.favs[id];
+    if (on) model.state.favs[id] = true; else delete model.state.favs[id];
+    btn.textContent = on ? '★' : '☆';
+    btn.classList.toggle('is-on', on);
+    save();
+    updateFavLabel();
+    const w = model.byId[id];
+    toast(on ? '已收藏 ' + (w ? w.w : id) : '已取消收藏');
+  }
+
+  function loadQueue(ids) {
+    model.queue = ids;
+    model.rendered = 0;
+    model.cards = [];
+    model.active = 0;
+    feed.innerHTML = '';
+    feed.scrollTop = 0;
+    if (!ids.length) return;
+    renderChunk();
+    updateKeys();
+  }
+
+  function enterFav() {
+    model.state.favs = model.state.favs || {};
+    const ids = Object.keys(model.state.favs).filter(function (id) { return !!model.byId[id]; });
+    if (!ids.length) { toast('还没有收藏的词：点卡片右上角 ☆'); return; }
+    ids.sort(function (a, b) { return (model.byId[a].rank || 0) - (model.byId[b].rank || 0); });
+    model.mode = 'fav';
+    $('settings').hidden = true;
+    $('backBtn').hidden = false;
+    document.body.classList.add('mode-fav');
+    loadQueue(ids);
+    updateTop();
+    countLabel.textContent = '收藏 ' + ids.length + ' 个';
+    progressFill.style.width = '100%';
+  }
+
+  function exitFav() {
+    model.mode = 'today';
+    $('backBtn').hidden = true;
+    document.body.classList.remove('mode-fav');
+    loadQueue(buildQueue(model.words, model.state, model.today, model.state.settings.dailyNew));
+    updateTop();
   }
 
   /* ---------- 完成页 ---------- */
@@ -530,6 +655,12 @@ function boot() {
   feed.addEventListener('scroll', onScroll, { passive: true });
 
   feed.addEventListener('click', function (e) {
+    const favBtn = e.target.closest('.fav');
+    if (favBtn) {
+      e.stopPropagation();
+      toggleFav(favBtn);
+      return;
+    }
     const speakBtn = e.target.closest('.speak');
     if (speakBtn) {
       e.stopPropagation();
@@ -545,8 +676,11 @@ function boot() {
   });
 
   $('gearBtn').addEventListener('click', function () {
+    updateFavLabel();
     $('settings').hidden = false;
   });
+  $('favBtn').addEventListener('click', enterFav);
+  $('backBtn').addEventListener('click', exitFav);
   $('closeSettings').addEventListener('click', function () {
     $('settings').hidden = true;
   });
@@ -619,6 +753,17 @@ function boot() {
     }
     model.words = words;
     words.forEach(function (w) { model.byId[w.id] = w; });
+
+    // 同义索引：释义完全相同的词
+    model.senseIndex = new Map();
+    words.forEach(function (w) {
+      w.cn.forEach(function (sn) {
+        if (!sn) return;
+        if (!model.senseIndex.has(sn)) model.senseIndex.set(sn, []);
+        const arr = model.senseIndex.get(sn);
+        if (arr.length < 60) arr.push(w);
+      });
+    });
     model.today = todayStr();
     model.state = loadState();
     const dn = Number(model.state.settings.dailyNew);
@@ -638,6 +783,7 @@ function boot() {
     save();
 
     syncSettingsUI();
+    updateFavLabel();
     updateTop();
 
     if (!model.queue.length) {

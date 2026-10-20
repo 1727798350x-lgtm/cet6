@@ -23,6 +23,8 @@
     </div>
   </header>
 
+  <button class="back-pill" id="backBtn" hidden>← 回到今天</button>
+
   <!-- 卡片流：所有卡片由 app.js 生成 -->
   <main class="feed" id="feed" aria-live="polite"></main>
 
@@ -78,6 +80,10 @@
           <button class="seg__btn" data-value="m">中</button>
           <button class="seg__btn" data-value="l">大</button>
         </div>
+      </div>
+
+      <div class="field">
+        <button class="btn" id="favBtn">收藏夹</button>
       </div>
 
       <div class="field field--row">
