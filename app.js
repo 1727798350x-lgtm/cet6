@@ -11,8 +11,9 @@
 // 台阶：stage 0 → 1 天，1 → 2 天，……，6 → 30 天（封顶）
 const STEPS = [1, 2, 4, 7, 15, 30, 30];
 const KEY = 'cet6_progress_v1';
-const MAX_CARDS = 300;
+const MAX_CARDS = 6000;   // 词库只有几千词，等于不限
 const CHUNK = 24;
+const SOFT_GOAL = 200;    // 顶部进度条按 200 张填满，只是激励，不是上限
 const RATING_TEXT = { again: '忘了', hard: '模糊', good: '记得' };
 
 /* ---------------- 日期工具 ---------------- */
@@ -90,7 +91,8 @@ function buildQueue(words, state, today, dailyNew) {
   const restDue = due.map(function (x) { return x.id; }).filter(function (id) {
     return warm.indexOf(id) === -1;
   });
-  const newIds = fresh.slice(0, Math.max(0, dailyNew | 0)).map(function (w) { return w.id; });
+  // dailyNew <= 0 表示不限：新词全部进队列
+  const newIds = (dailyNew > 0 ? fresh.slice(0, dailyNew) : fresh).map(function (w) { return w.id; });
 
   let di = 0, ni = 0;
   // 复习 : 新词 = 2 : 1
@@ -152,7 +154,7 @@ function defaultState() {
   return {
     version: 1,
     updatedAt: '',
-    settings: { dailyNew: 30, fontSize: 'm' },
+    settings: { dailyNew: 0, fontSize: 'm' },  // 0 = 不限
     stats: { streak: 0, lastStudy: '', lastDay: '', todayTotal: 0 },
     words: {}
   };
@@ -187,7 +189,8 @@ function loadState() {
       };
     }
     if (['s', 'm', 'l'].indexOf(out.settings.fontSize) === -1) out.settings.fontSize = 'm';
-    out.settings.dailyNew = Math.min(80, Math.max(5, Number(out.settings.dailyNew) || 30));
+    const dn = Number(out.settings.dailyNew);
+    out.settings.dailyNew = (isFinite(dn) && dn >= 0) ? Math.min(500, dn) : 0;
     return out;
   } catch (e) {
     return defaultState();
@@ -324,35 +327,26 @@ function boot() {
 
   /* ---------- 渲染 ---------- */
   function cardHTML(w) {
+    const svg = '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">' +
+      '<path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor"/>' +
+      '<path d="M16.5 8.5a5 5 0 0 1 0 7" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/>' +
+      '<path d="M19 6a8.5 8.5 0 0 1 0 12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/>' +
+      '</svg>';
     return '' +
-      '<div class="card__inner">' +
-        '<div class="card__face card__front">' +
-          '<div class="card__word">' + esc(w.w) + '</div>' +
-          '<div class="card__ipa">' + esc(w.ipa) + '</div>' +
-          '<div class="card__hint">先想一下意思</div>' +
-          '<div class="card__tap">点卡片看释义</div>' +
+      '<div class="card__body">' +
+        '<div class="card__head">' +
+          '<span class="card__word">' + esc(w.w) + '</span>' +
+          '<span class="card__flag" aria-hidden="true"></span>' +
+          '<button class="speak" data-speak="' + esc(w.w) + '" aria-label="朗读单词">' + svg + '</button>' +
         '</div>' +
-        '<div class="card__face card__back">' +
-          '<div class="back__head">' +
-            '<span class="back__word">' + esc(w.w) + '</span>' +
-            '<span class="back__ipa">' + esc(w.ipa) + '</span>' +
-            '<button class="speak" data-speak="' + esc(w.w) + '" aria-label="朗读单词">' +
-              '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">' +
-                '<path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor"/>' +
-                '<path d="M16.5 8.5a5 5 0 0 1 0 7" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/>' +
-                '<path d="M19 6a8.5 8.5 0 0 1 0 12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/>' +
-              '</svg>' +
-            '</button>' +
-          '</div>' +
-          '<div class="back__pos">' + esc(w.pos) + '</div>' +
-          '<div class="back__cn">' + esc(w.cn.join('；')) + '</div>' +
-          '<div class="back__rule"></div>' +
-          '<div class="back__ex">' + esc(w.ex) + '</div>' +
-          '<div class="back__excn">' + esc(w.exCn) + '</div>' +
-          (w.root ? '<div class="back__root">' + esc(w.root) + '</div>' : '') +
-        '</div>' +
-      '</div>' +
-      '<div class="card__flag" aria-hidden="true"></div>';
+        '<div class="card__ipa">' + esc(w.ipa) + '</div>' +
+        (w.pos ? '<div class="card__pos">' + esc(w.pos) + '</div>' : '') +
+        '<div class="card__cn">' + esc(w.cn.join('；')) + '</div>' +
+        (w.ex ? '<div class="card__rule"></div>' : '') +
+        (w.ex ? '<div class="card__ex">' + esc(w.ex) + '</div>' : '') +
+        (w.exCn ? '<div class="card__excn">' + esc(w.exCn) + '</div>' : '') +
+        (w.root ? '<div class="card__root">' + esc(w.root) + '</div>' : '') +
+      '</div>';
   }
 
   function renderChunk() {
@@ -376,30 +370,19 @@ function boot() {
   /* ---------- 顶部进度 ---------- */
   function updateTop() {
     const done = countDoneToday(model.state, model.today);
-    const total = Math.max(model.state.stats.todayTotal || 0, done, 1);
-    countLabel.textContent = done + ' / ' + total;
-    progressFill.style.width = Math.min(100, (done / total) * 100) + '%';
+    countLabel.textContent = '已刷 ' + done + ' 张';
+    progressFill.style.width = Math.min(100, (done / SOFT_GOAL) * 100) + '%';
     dayLabel.textContent = '今天 · ' + model.today.slice(5).replace('-', '/');
   }
 
   /* ---------- 三键状态 ---------- */
   function updateKeys() {
-    const el = model.cards[model.active];
-    const flipped = !!(el && el.classList.contains('is-back'));
-    keys.classList.toggle('is-locked', !flipped);
-    keyBtns.forEach(function (b) { b.disabled = !flipped; });
-    keyHint.textContent = flipped ? '这张你记住了吗？' : '先点卡片看释义，再评分';
+    keys.classList.remove('is-locked');
+    keyBtns.forEach(function (b) { b.disabled = false; });
+    keyHint.textContent = '按感觉点一下，或直接上滑到下一个';
   }
 
   /* ---------- 卡片交互 ---------- */
-  function toggleFlip(card) {
-    // 只允许「正面 → 背面」：翻开后点内容是为了滚动，不能再误触翻回去
-    if (card.classList.contains('is-rated')) return;
-    if (card.classList.contains('is-back')) return;
-    card.classList.add('is-back');
-    updateKeys();
-  }
-
   function applyRate(el, rating) {
     const id = el.dataset.id;
     applyRating(model.state, id, rating, model.today);
@@ -429,7 +412,7 @@ function boot() {
   function rate(rating) {
     if (model.lock) return;
     const el = model.cards[model.active];
-    if (!el || !el.classList.contains('is-back')) return;
+    if (!el) return;
     applyRate(el, rating);
     model.lock = true;
     setTimeout(function () { model.lock = false; }, 340);
@@ -553,8 +536,6 @@ function boot() {
       speak(speakBtn.dataset.speak);
       return;
     }
-    const card = e.target.closest('.card');
-    if (card) toggleFlip(card);
   });
 
   keys.addEventListener('click', function (e) {
@@ -579,7 +560,7 @@ function boot() {
       model.state.settings.dailyNew = v;
       save();
       syncSettingsUI();
-      toast('每日新词改为 ' + v + '，明天生效');
+      toast(v ? '每日新词改为 ' + v + ' 个，明天生效' : '已改为不限每日新词，明天生效');
     });
   });
   document.querySelectorAll('[data-setting="fontSize"] .seg__btn').forEach(function (b) {
@@ -616,7 +597,7 @@ function boot() {
     if (e.target && /INPUT|TEXTAREA/.test(e.target.tagName)) return;
     if (e.key === ' ' || e.key === 'Enter') {
       const el = model.cards[model.active];
-      if (el) { e.preventDefault(); toggleFlip(el); }
+      if (el) { e.preventDefault(); speak(el.dataset.id); }
     } else if (e.key === 'ArrowDown') {
       e.preventDefault(); scrollToIndex(Math.min(model.active + 1, model.cards.length - 1));
     } else if (e.key === 'ArrowUp') {
@@ -640,7 +621,8 @@ function boot() {
     words.forEach(function (w) { model.byId[w.id] = w; });
     model.today = todayStr();
     model.state = loadState();
-    model.state.settings.dailyNew = Math.min(80, Math.max(5, Number(model.state.settings.dailyNew) || 30));
+    const dn = Number(model.state.settings.dailyNew);
+    model.state.settings.dailyNew = (isFinite(dn) && dn >= 0) ? Math.min(500, dn) : 0;
     document.body.dataset.fs = model.state.settings.fontSize;
 
     // 跨天：只重置“今天”的计数，不动任何词的进度

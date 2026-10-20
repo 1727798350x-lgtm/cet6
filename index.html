@@ -28,7 +28,7 @@
 
   <!-- 底部三键 -->
   <footer class="actionbar">
-    <div class="hintline" id="keyHint">先点卡片看释义，再评分</div>
+    <div class="hintline" id="keyHint">按感觉点一下，或直接上滑到下一个</div>
     <div class="keys is-locked" id="keys">
       <button class="key key--again" data-rating="again" disabled>忘了</button>
       <button class="key key--hard" data-rating="hard" disabled>模糊</button>
@@ -62,11 +62,11 @@
       </div>
 
       <div class="field" data-setting="dailyNew">
-        <label>每日新词（明天生效）</label>
+        <label>每日新词（0 = 不限，明天生效）</label>
         <div class="seg">
+          <button class="seg__btn" data-value="0">不限</button>
           <button class="seg__btn" data-value="10">10</button>
           <button class="seg__btn" data-value="20">20</button>
-          <button class="seg__btn" data-value="30">30</button>
           <button class="seg__btn" data-value="40">40</button>
         </div>
       </div>
