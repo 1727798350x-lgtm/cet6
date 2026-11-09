@@ -161,7 +161,7 @@ function defaultState() {
   return {
     version: 1,
     updatedAt: '',
-    settings: { dailyNew: 0, fontSize: 'm' },  // 0 = 不限
+    settings: { dailyNew: 0, fontSize: 'm', onlineAudio: true },  // dailyNew 0 = 不限；onlineAudio = 系统语音不可用时联网发音
     stats: { streak: 0, lastStudy: '', lastDay: '', todayTotal: 0, cursorRank: 0 },
     favs: {},
     words: {}
@@ -198,6 +198,7 @@ function loadState() {
       };
     }
     if (['s', 'm', 'l'].indexOf(out.settings.fontSize) === -1) out.settings.fontSize = 'm';
+    out.settings.onlineAudio = out.settings.onlineAudio !== false;
     out.stats.cursorRank = Number(out.stats.cursorRank) || 0;
     const dn = Number(out.settings.dailyNew);
     out.settings.dailyNew = (isFinite(dn) && dn >= 0) ? Math.min(500, dn) : 0;
@@ -303,7 +304,15 @@ function boot() {
   }
 
   /* ---------- 发音 ---------- */
-  const audio = { ready: false, voice: null };
+  const audio = {
+    ready: false,
+    voice: null,
+    seq: 0,           // 每次发音自增，过期的回调直接作废
+    started: false,   // 系统语音是否真的开始发声
+    onlineStarted: false,
+    ttsTimer: 0,
+    player: null      // 在线发音用的 <audio>
+  };
 
   function pickVoice() {
     if (!window.speechSynthesis) return null;
@@ -313,28 +322,88 @@ function boot() {
     return us[0] || en[0] || null;
   }
 
-  let speakGen = 0;
+  function stopAudio() {
+    clearTimeout(audio.ttsTimer);
+    try { if (window.speechSynthesis) speechSynthesis.cancel(); } catch (e) { /* 忽略 */ }
+    if (audio.player) {
+      try { audio.player.pause(); } catch (e) { /* 忽略 */ }
+      audio.player = null;
+    }
+  }
+
+  // 系统语音不可用时的兜底：联网播放发音（有道词典音频，https，一个词约 10KB）
+  function playOnline(text, seq) {
+    if (seq !== audio.seq) return;
+    if (!(model.state && model.state.settings.onlineAudio)) {
+      toast('手机缺英语语音包，可在系统设置 → 文字转语音 里安装');
+      return;
+    }
+    try {
+      if (audio.player) { try { audio.player.pause(); } catch (e) { /* 忽略 */ } }
+      const a = new Audio('https://dict.youdao.com/dictvoice?audio=' + encodeURIComponent(text) + '&type=2');
+      a.preload = 'auto';
+      a.volume = 1;
+      audio.player = a;
+      audio.onlineStarted = false;
+      a.onerror = function () {
+        if (seq !== audio.seq) return;
+        toast('发音失败：系统语音不可用，在线发音也没连上，检查一下网络');
+      };
+      const p = a.play();
+      if (p && typeof p.then === 'function') {
+        p.then(function () {
+          if (seq === audio.seq) audio.onlineStarted = true;
+        }).catch(function () {
+          /* 被自动播放策略拦了：点一下卡片上的小喇叭即可 */
+        });
+      }
+    } catch (e) { /* 忽略 */ }
+  }
+
   function speak(text) {
-    if (!window.speechSynthesis) { toast('这个浏览器不支持朗读，先看音标吧'); return; }
+    if (!text) return;
+    const seq = ++audio.seq;
+    audio.started = false;
+    audio.onlineStarted = false;
+    stopAudio();
+    if (!window.speechSynthesis) { playOnline(text, seq); return; }
+    const voices = speechSynthesis.getVoices() || [];
+    const hasEnglish = voices.some(function (v) { return /^en[-_]/i.test(v.lang); });
+    // 装了语音引擎但只有中文音色：直接在线发音，免得把英文读成怪音
+    if (voices.length && !hasEnglish) { playOnline(text, seq); return; }
     try {
       if (!audio.voice) audio.voice = pickVoice();
       const u = new SpeechSynthesisUtterance(text);
       u.lang = 'en-US';
       u.rate = 0.9;
       if (audio.voice) u.voice = audio.voice;
-      const gen = ++speakGen;
-      // iOS：cancel() 紧跟 speak() 偶尔会没声音，先停掉旧的一句，缓一下再读
-      if (speechSynthesis.speaking || speechSynthesis.pending) {
-        speechSynthesis.cancel();
-        setTimeout(function () {
-          if (gen !== speakGen) return;
-          try { speechSynthesis.speak(u); } catch (e) { /* 忽略 */ }
-        }, 40);
-      } else {
-        speechSynthesis.speak(u);
-      }
+      u.onstart = function () {
+        if (seq !== audio.seq) return;
+        audio.started = true;
+        clearTimeout(audio.ttsTimer);
+      };
+      u.onerror = function () {
+        if (seq !== audio.seq) return;
+        clearTimeout(audio.ttsTimer);
+        playOnline(text, seq);
+      };
+      // 安卓部分机型 cancel() 后紧接着 speak() 会没声音，隔一小会儿再读
+      setTimeout(function () {
+        if (seq !== audio.seq) return;
+        try {
+          speechSynthesis.speak(u);
+        } catch (e) {
+          playOnline(text, seq);
+          return;
+        }
+        // 900ms 内没开始发声也没报错 → 认为系统语音哑了，改用在线发音
+        audio.ttsTimer = setTimeout(function () {
+          if (seq !== audio.seq || audio.started) return;
+          if (!speechSynthesis.speaking && !speechSynthesis.pending) playOnline(text, seq);
+        }, 900);
+      }, 50);
     } catch (e) {
-      toast('朗读失败，可以先看音标');
+      playOnline(text, seq);
     }
   }
 
@@ -355,6 +424,20 @@ function boot() {
       speechSynthesis.speak(u);
     } catch (e) { /* 忽略 */ }
   }, { once: true });
+
+  // 设置里的「测试发音」：把诊断结果直接告诉用户
+  function testSpeak() {
+    const list = (window.speechSynthesis && speechSynthesis.getVoices()) || [];
+    const en = list.filter(function (v) { return /^en[-_]/i.test(v.lang); });
+    speak('hello');
+    setTimeout(function () {
+      let how;
+      if (audio.started) how = '系统语音正常';
+      else if (audio.onlineStarted) how = '系统语音不可用，已改用在线发音';
+      else how = '没发声：先检查媒体音量/静音，再到系统设置 → 文字转语音 里装英语语音包（或打开在线发音兜底）';
+      toast('语音 ' + list.length + ' 个（英文 ' + en.length + ' 个）｜' + how);
+    }, 1500);
+  }
 
   /* ---------- 自动发音 ---------- */
   // 换到新单词时自动读一遍；连续快速滑动只读最后停下的那个词
@@ -821,6 +904,9 @@ function boot() {
     document.querySelectorAll('[data-setting="fontSize"] .seg__btn').forEach(function (b) {
       b.classList.toggle('is-on', b.dataset.value === model.state.settings.fontSize);
     });
+    document.querySelectorAll('[data-setting="onlineAudio"] .seg__btn').forEach(function (b) {
+      b.classList.toggle('is-on', (b.dataset.value === '1') === !!model.state.settings.onlineAudio);
+    });
   }
 
   function exportBackup() {
@@ -935,6 +1021,17 @@ function boot() {
       syncSettingsUI();
     });
   });
+  document.querySelectorAll('[data-setting="onlineAudio"] .seg__btn').forEach(function (b) {
+    b.addEventListener('click', function () {
+      model.state.settings.onlineAudio = b.dataset.value === '1';
+      save();
+      syncSettingsUI();
+      toast(model.state.settings.onlineAudio
+        ? '已打开在线发音兜底：系统语音没声音时自动联网发音'
+        : '已关闭在线发音兜底：只使用手机系统语音');
+    });
+  });
+  if ($('testSpeakBtn')) $('testSpeakBtn').addEventListener('click', testSpeak);
   document.addEventListener('click', function (e) {
     const t = e.target.closest('[data-fs-btn]');
     if (!t) return;
