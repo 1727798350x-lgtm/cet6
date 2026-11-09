@@ -253,8 +253,9 @@ function validateWords(raw) {
 function boot() {
   const $ = function (id) { return document.getElementById(id); };
   const feed = $('feed');
+  const track = $('track');
   const keys = $('keys');
-  const keyHint = $('keyHint');
+  const favKey = $('favKey');
   const progressFill = $('progressFill');
   const countLabel = $('countLabel');
   const dayLabel = $('dayLabel');
@@ -312,16 +313,26 @@ function boot() {
     return us[0] || en[0] || null;
   }
 
+  let speakGen = 0;
   function speak(text) {
     if (!window.speechSynthesis) { toast('这个浏览器不支持朗读，先看音标吧'); return; }
     try {
       if (!audio.voice) audio.voice = pickVoice();
-      speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(text);
       u.lang = 'en-US';
       u.rate = 0.9;
       if (audio.voice) u.voice = audio.voice;
-      speechSynthesis.speak(u);
+      const gen = ++speakGen;
+      // iOS：cancel() 紧跟 speak() 偶尔会没声音，先停掉旧的一句，缓一下再读
+      if (speechSynthesis.speaking || speechSynthesis.pending) {
+        speechSynthesis.cancel();
+        setTimeout(function () {
+          if (gen !== speakGen) return;
+          try { speechSynthesis.speak(u); } catch (e) { /* 忽略 */ }
+        }, 40);
+      } else {
+        speechSynthesis.speak(u);
+      }
     } catch (e) {
       toast('朗读失败，可以先看音标');
     }
@@ -344,6 +355,19 @@ function boot() {
       speechSynthesis.speak(u);
     } catch (e) { /* 忽略 */ }
   }, { once: true });
+
+  /* ---------- 自动发音 ---------- */
+  // 换到新单词时自动读一遍；连续快速滑动只读最后停下的那个词
+  let autoSpeakTimer = 0;
+  function speakCurrent() {
+    clearTimeout(autoSpeakTimer);
+    autoSpeakTimer = setTimeout(function () {
+      const el = model.cards[model.active];
+      if (!el) return;
+      const w = model.byId[el.dataset.id];
+      if (w && w.w) speak(w.w);
+    }, 180);
+  }
 
   /* ---------- 相关词 ---------- */
   // 同义：释义里至少一条完全相同的其他词
@@ -422,7 +446,7 @@ function boot() {
       model.cards.push(el);
     }
     model.rendered = end;
-    feed.appendChild(frag);
+    track.appendChild(frag);
   }
 
   /* ---------- 顶部进度 ---------- */
@@ -445,7 +469,16 @@ function boot() {
   function updateKeys() {
     keys.classList.remove('is-locked');
     keyBtns.forEach(function (b) { b.disabled = false; });
-    keyHint.textContent = '按感觉点一下，或直接上滑到下一个';
+    updateFavKey();
+  }
+
+  function updateFavKey() {
+    if (!favKey) return;
+    const el = model.cards[model.active];
+    const id = el && el.dataset.id;
+    const on = !!(id && model.state.favs && model.state.favs[id]);
+    favKey.classList.toggle('is-on', on);
+    favKey.textContent = on ? '★ 已收藏' : '☆ 收藏';
   }
 
   /* ---------- 卡片交互 ---------- */
@@ -470,35 +503,49 @@ function boot() {
     }
   }
 
-  function scrollToIndex(i) {
-    const h = feed.clientHeight || window.innerHeight;
-    feed.scrollTo({ top: i * h, behavior: 'smooth' });
+  /* ---------- 平移引擎：一屏一张，滑一下就切一张 ---------- */
+  const view = {
+    pos: 0,          // 当前视觉位置（卡片索引，拖动时是小数）
+    pitch: 0,        // 一张卡的高度（缓存；iOS 工具栏伸缩后要重算）
+    pitchDirty: false,
+    dragging: false,
+    mode: '',        // '' | 'pending' | 'inner' | 'paging'
+    startY: 0,
+    startPos: 0,
+    lastY: 0,
+    lastT: 0,
+    vel: 0,          // 手指速度 px/ms，向上为负
+    inner: null      // 当前卡片正文能不能上下滚
+  };
+
+  // 一屏的距离以卡片自身高度为准（100dvh 可能和 feed 的可视高度差几像素）
+  function feedHeight() {
+    if (view.pitch > 0) return view.pitch;
+    const a = model.cards[0];
+    const b = model.cards[1];
+    const d = (a && b) ? (b.offsetTop - a.offsetTop) : 0;
+    view.pitch = d > 0 ? d : ((a && a.offsetHeight) || feed.clientHeight || window.innerHeight || 1);
+    return view.pitch;
   }
 
-  function rate(rating) {
-    if (model.lock) return;
-    const el = model.cards[model.active];
-    if (!el) return;
-    applyRate(el, rating);
-    model.lock = true;
-    setTimeout(function () { model.lock = false; }, 340);
-
-    const next = model.active + 1;
-    if (next < model.queue.length) {
-      if (next >= model.rendered) renderChunk();
-      requestAnimationFrame(function () { scrollToIndex(next); });
-    } else if (model.mode === 'fav') {
-      toast('收藏夹到头了，点左上角回到今天');
-    } else {
-      setTimeout(showDone, 300);
-    }
+  function applyPos(pos, animate) {
+    view.pos = pos;
+    track.style.transition = animate ? 'transform 300ms cubic-bezier(.22,.86,.24,1)' : 'none';
+    track.style.transform = 'translate3d(0,' + (-pos * feedHeight()).toFixed(2) + 'px,0)';
   }
 
-  function setActive(next, movingDown) {
-    model.active = next;
-    // 「滑过去不算」：只把浏览位置记下来，不写学习记录
-    if (model.mode === 'today') trackCursor();
-    updateKeys();
+  function readPos() {
+    const t = window.getComputedStyle(track).transform;
+    if (!t || t === 'none') return view.pos;
+    const m = /matrix(?:3d)?\(([^)]+)\)/.exec(t);
+    if (!m) return view.pos;
+    const n = m[1].split(',').map(Number);
+    const ty = n.length > 6 ? n[13] : n[5];
+    return -ty / feedHeight();
+  }
+
+  function bodyOf(el) {
+    return el ? el.querySelector('.card__body') : null;
   }
 
   function trackCursor() {
@@ -512,34 +559,192 @@ function boot() {
     }
   }
 
-  let ticking = false;
-  function onScroll() {
-    if (ticking) return;
-    ticking = true;
-    requestAnimationFrame(function () {
-      ticking = false;
-      const h = feed.clientHeight || window.innerHeight;
-      if (!h) return;
-      let idx = Math.round(feed.scrollTop / h);
-      idx = Math.max(0, Math.min(idx, model.cards.length - 1));
-      if (idx !== model.active) setActive(idx, idx > model.active);
-      if (idx + 6 >= model.rendered && model.rendered < model.queue.length) renderChunk();
-    });
+  function commitActive(index) {
+    model.active = index;
+    // 「滑过去不算」：只把浏览位置记下来，不写学习记录
+    if (model.mode === 'today') trackCursor();
+    updateKeys();
+  }
+
+  // 切到第 index 张：renderChunk 预渲染、按钮状态、自动发音都在这里
+  function goTo(index, animate) {
+    if (!model.cards.length) { applyPos(0, false); return; }
+    const target = Math.max(0, Math.min(model.cards.length - 1, index));
+    if (target !== model.active) {
+      if (target + 6 >= model.rendered && model.rendered < model.queue.length) renderChunk();
+      commitActive(target);
+      speakCurrent();
+    }
+    applyPos(target, animate !== false);
+  }
+
+  function rate(rating) {
+    if (model.lock || view.dragging) return;
+    const el = model.cards[model.active];
+    if (!el) return;
+    applyRate(el, rating);
+    model.lock = true;
+    setTimeout(function () { model.lock = false; }, 320);
+
+    const next = model.active + 1;
+    if (next < model.queue.length) {
+      if (next >= model.rendered) renderChunk();
+      goTo(next, true);
+    } else if (model.mode === 'fav') {
+      toast('收藏夹到头了，点左上角回到今天');
+    } else {
+      setTimeout(showDone, 300);
+    }
+  }
+
+  /* ---------- 手势：上滑 → 下一个词（下滑回上一个） ---------- */
+  function onTouchStart(e) {
+    if (e.touches.length !== 1) {
+      // 多指（捏合/误触）：放弃这次拖动，回到已经确认的那一张
+      if (view.dragging) {
+        view.dragging = false;
+        view.mode = '';
+        goTo(model.active, true);
+      }
+      return;
+    }
+    const t = e.touches[0];
+    view.dragging = true;
+    view.mode = 'pending';
+    view.startY = view.lastY = t.clientY;
+    view.lastT = Date.now();
+    view.vel = 0;
+    view.startPos = readPos();
+    applyPos(view.startPos, false);
+    const body = bodyOf(model.cards[model.active]);
+    view.inner = body ? {
+      down: body.scrollHeight - body.clientHeight - body.scrollTop > 3,
+      up: body.scrollTop > 3
+    } : null;
+  }
+
+  function onTouchMove(e) {
+    if (!view.dragging) return;
+    if (e.touches.length !== 1) {
+      // 中途多指：放弃这次手势，回到已经确认的那一张
+      view.dragging = false;
+      view.mode = '';
+      if (model.cards.length) goTo(model.active, true);
+      return;
+    }
+    if (!model.cards.length) return;
+    const t = e.touches[0];
+    const now = Date.now();
+    const dt = now - view.lastT;
+    if (dt > 0) view.vel = (t.clientY - view.lastY) / dt;
+    view.lastY = t.clientY;
+    view.lastT = now;
+    const dy = t.clientY - view.startY;
+
+    if (view.mode === 'pending') {
+      if (Math.abs(dy) < 2) return;
+      // 正文比一屏长时才需要让原生滚动先接管；一般卡片正文不会溢出
+      if (view.inner && (view.inner.down || view.inner.up)) {
+        if (Math.abs(dy) < 7) return;
+        if ((dy < 0 && view.inner.down) || (dy > 0 && view.inner.up)) {
+          view.mode = 'inner';
+          return;
+        }
+      }
+      view.mode = 'paging';
+    }
+    if (view.mode !== 'paging') return;
+    // 尽早拦截：iOS 一旦先开始原生滚动，后面的 touchmove 就不可取消了
+    if (e.cancelable) e.preventDefault();
+
+    const h = feedHeight();
+    let pos = view.startPos - dy / h;
+    const max = model.cards.length - 1;
+    if (pos < 0) pos *= 0.32;                          // 第一张继续往下滑：橡皮筋
+    else if (pos > max) pos = max + (pos - max) * 0.32; // 最后一张继续往上滑：橡皮筋
+    applyPos(pos, false);
+  }
+
+  function onTouchEnd() {
+    if (!view.dragging) { view.mode = ''; return; }
+    view.dragging = false;
+    const wasPaging = view.mode === 'paging';
+    view.mode = '';
+    // 拖动途中视口变了（地址栏伸缩/横屏）：回位重算，别按旧尺子切页
+    if (view.pitchDirty) {
+      view.pitchDirty = false;
+      view.pitch = 0;
+      goTo(model.active, true);
+      return;
+    }
+    // 只是点了一下（或卡片正文在滚动）：确保停在整张卡片的位置
+    if (!wasPaging) { goTo(model.active, true); return; }
+
+    const h = feedHeight();
+    const dist = (view.startY - view.lastY) / h; // > 0 表示手指往上（切下一个）
+    const speed = -view.vel;                     // 手指往上甩 → 正数
+    // 用「上一张已确定的卡」作基准：动画还没走完就接着滑，也不会丢步
+    const base = model.active;
+    let target = base;
+    if (dist > 0.015 && (dist > 0.09 || speed > 0.45)) target = base + 1;
+    else if (dist < -0.015 && (dist < -0.09 || speed < -0.45)) target = base - 1;
+    goTo(target, true);
+  }
+
+  // 系统打断（来电/返回手势/切后台）：不算用户松手，回位不切页
+  function onTouchCancel() {
+    if (!view.dragging) { view.mode = ''; return; }
+    view.dragging = false;
+    view.mode = '';
+    if (view.pitchDirty) {
+      view.pitchDirty = false;
+      view.pitch = 0;
+    }
+    goTo(model.active, true);
+  }
+
+  let wheelAcc = 0;
+  let wheelLockedUntil = 0;
+  function onWheel(e) {
+    if (!model.cards.length) return;
+    e.preventDefault();
+    let d = e.deltaY;
+    if (e.deltaMode === 1) d *= 16;             // 按“行”滚的浏览器
+    else if (e.deltaMode === 2) d *= feedHeight(); // 按“页”滚的浏览器
+    wheelAcc += d;
+    const now = Date.now();
+    if (now < wheelLockedUntil) return;          // 保留惯性，等冷却结束再判
+    if (Math.abs(wheelAcc) >= 20) {
+      goTo(model.active + (wheelAcc > 0 ? 1 : -1), true);
+      wheelAcc = 0;
+      wheelLockedUntil = now + 240;
+    }
   }
 
   /* ---------- 收藏 ---------- */
-  function toggleFav(btn) {
-    const id = btn.dataset.fav;
+  function setFav(id, on) {
     if (!id) return;
     model.state.favs = model.state.favs || {};
-    const on = !model.state.favs[id];
     if (on) model.state.favs[id] = true; else delete model.state.favs[id];
-    btn.textContent = on ? '★' : '☆';
-    btn.classList.toggle('is-on', on);
+    const el = model.cards[model.active];
+    if (el && el.dataset.id === id) {
+      const b = el.querySelector('.fav');
+      if (b) {
+        b.textContent = on ? '★' : '☆';
+        b.classList.toggle('is-on', on);
+      }
+    }
     save();
     updateFavLabel();
+    updateFavKey();
     const w = model.byId[id];
     toast(on ? '已收藏 ' + (w ? w.w : id) : '已取消收藏');
+  }
+
+  function toggleFavBtn(btn) {
+    const id = btn.dataset.fav;
+    if (!id) return;
+    setFav(id, !(model.state.favs && model.state.favs[id]));
   }
 
   function loadQueue(ids) {
@@ -547,11 +752,14 @@ function boot() {
     model.rendered = 0;
     model.cards = [];
     model.active = 0;
-    feed.innerHTML = '';
-    feed.scrollTop = 0;
-    if (!ids.length) return;
+    track.innerHTML = '';
+    view.pos = 0;
+    view.pitch = 0;
+    if (!ids.length) { applyPos(0, false); return; }
     renderChunk();
     updateKeys();
+    applyPos(0, false);
+    speakCurrent();
   }
 
   function enterFav() {
@@ -601,7 +809,7 @@ function boot() {
     $('doneScreen').hidden = true;
     renderChunk();
     updateTop();
-    requestAnimationFrame(function () { scrollToIndex(start); });
+    requestAnimationFrame(function () { goTo(start, true); });
   }
 
   /* ---------- 设置 ---------- */
@@ -652,13 +860,29 @@ function boot() {
   }
 
   /* ---------- 事件绑定 ---------- */
-  feed.addEventListener('scroll', onScroll, { passive: true });
+  feed.addEventListener('touchstart', onTouchStart, { passive: true });
+  feed.addEventListener('touchmove', onTouchMove, { passive: false });
+  feed.addEventListener('touchend', onTouchEnd, { passive: true });
+  feed.addEventListener('touchcancel', onTouchCancel, { passive: true });
+  feed.addEventListener('wheel', onWheel, { passive: false });
+
+  // 视口变化（iPhone 地址栏伸缩 / 横竖屏）后重新对齐一屏距离
+  function relayout() {
+    if (view.dragging) { view.pitchDirty = true; return; }
+    view.pitchDirty = false;
+    view.pitch = 0;
+    applyPos(model.active, false);
+  }
+  window.addEventListener('resize', relayout);
+  window.addEventListener('orientationchange', relayout);
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', relayout);
 
   feed.addEventListener('click', function (e) {
+    if (view.dragging) return; // 正拖着卡片时另一根手指点的，忽略
     const favBtn = e.target.closest('.fav');
     if (favBtn) {
       e.stopPropagation();
-      toggleFav(favBtn);
+      toggleFavBtn(favBtn);
       return;
     }
     const speakBtn = e.target.closest('.speak');
@@ -670,9 +894,16 @@ function boot() {
   });
 
   keys.addEventListener('click', function (e) {
+    if (view.dragging) return;
     const btn = e.target.closest('.key');
     if (!btn) return;
-    rate(btn.dataset.rating);
+    if (btn.dataset.rating) { rate(btn.dataset.rating); return; }
+    if (btn.dataset.action === 'fav') {
+      const el = model.cards[model.active];
+      if (!el) return;
+      const id = el.dataset.id;
+      setFav(id, !(model.state.favs && model.state.favs[id]));
+    }
   });
 
   $('gearBtn').addEventListener('click', function () {
@@ -726,18 +957,22 @@ function boot() {
   $('moreBtn').addEventListener('click', function () { moreWords(20); });
   $('closeDone').addEventListener('click', function () { $('doneScreen').hidden = true; });
 
-  // 桌面端调试：↓ 下一个 / ↑ 上一个 / 空格翻面 / 1 2 3 评分
+  // 桌面端调试：↓ 下一个 / ↑ 上一个 / 空格朗读 / 1 忘了 2 收藏 3 记得
   document.addEventListener('keydown', function (e) {
     if (e.target && /INPUT|TEXTAREA/.test(e.target.tagName)) return;
     if (e.key === ' ' || e.key === 'Enter') {
       const el = model.cards[model.active];
-      if (el) { e.preventDefault(); speak(el.dataset.id); }
+      const w = el && model.byId[el.dataset.id];
+      if (w) { e.preventDefault(); speak(w.w); }
     } else if (e.key === 'ArrowDown') {
-      e.preventDefault(); scrollToIndex(Math.min(model.active + 1, model.cards.length - 1));
+      e.preventDefault(); goTo(model.active + 1, true);
     } else if (e.key === 'ArrowUp') {
-      e.preventDefault(); scrollToIndex(Math.max(model.active - 1, 0));
+      e.preventDefault(); goTo(model.active - 1, true);
     } else if (e.key === '1') { rate('again'); }
-    else if (e.key === '2') { rate('hard'); }
+    else if (e.key === '2') {
+      const el = model.cards[model.active];
+      if (el) setFav(el.dataset.id, !(model.state.favs && model.state.favs[el.dataset.id]));
+    }
     else if (e.key === '3') { rate('good'); }
   });
 
@@ -794,6 +1029,8 @@ function boot() {
     renderChunk();
     model.active = 0;
     updateKeys();
+    applyPos(0, false);
+    speakCurrent();
   }
 
   init();

@@ -17,7 +17,7 @@
   --fs: 1;
   --safe-t: env(safe-area-inset-top, 0px);
   --safe-b: env(safe-area-inset-bottom, 0px);
-  --bar-h: 148px;
+  --bar-h: 106px;
 }
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -97,24 +97,23 @@ body[data-fs="l"] { --fs: 1.12; }
 }
 
 /* ---------------- 卡片流 ---------------- */
+/* 一屏一张：用 transform 整屏平移。手指上滑就直接切到下一个词，
+ * 不再依赖浏览器原生的 scroll-snap（那玩意儿安卓上又卡又容易滑不动）。 */
 .feed {
   position: fixed;
   inset: 0;
-  overflow-y: scroll;
-  overflow-x: hidden;
-  scroll-snap-type: y mandatory;
-  overscroll-behavior-y: contain;
-  -webkit-overflow-scrolling: touch;
-  scrollbar-width: none;
+  overflow: hidden;
 }
 
-.feed::-webkit-scrollbar { display: none; }
+.track {
+  position: relative;
+  width: 100%;
+  will-change: transform;
+}
 
 .card {
   position: relative;
   height: 100dvh;
-  scroll-snap-align: start;
-  scroll-snap-stop: always;
   display: flex;
 }
 
@@ -247,16 +246,6 @@ body[data-fs="l"] { --fs: 1.12; }
   background: linear-gradient(0deg, rgba(14, 15, 19, 0.98) 40%, rgba(14, 15, 19, 0.9) 75%, rgba(14, 15, 19, 0));
 }
 
-.hintline {
-  height: 18px;
-  line-height: 18px;
-  text-align: center;
-  font-size: 12px;
-  color: var(--faint);
-  margin-bottom: 8px;
-  transition: color 0.2s ease;
-}
-
 .keys {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -279,7 +268,8 @@ body[data-fs="l"] { --fs: 1.12; }
 .key:active { transform: scale(0.97); }
 
 .key--again { color: var(--red); border-color: #3a2228; background: #221a1d; }
-.key--hard { color: var(--amber); border-color: #3a3222; background: #221f17; }
+.key--fav { color: var(--amber); border-color: #3a3222; background: #221f17; }
+.key--fav.is-on { color: #ffd166; border-color: #4a3b18; background: #241f12; }
 .key--good { color: var(--green); border-color: #1f3a2c; background: #16221b; }
 
 .keys.is-locked .key { opacity: 0.32; }
@@ -475,7 +465,7 @@ body[data-fs="l"] { --fs: 1.12; }
 .toast {
   position: fixed;
   left: 50%;
-  bottom: calc(190px + var(--safe-b));
+  bottom: calc(122px + var(--safe-b));
   transform: translateX(-50%);
   z-index: 60;
   background: rgba(40, 45, 56, 0.96);
@@ -499,12 +489,12 @@ body[data-fs="l"] { --fs: 1.12; }
 
 /* ---------------- 适配 ---------------- */
 @media (min-height: 720px) {
-  :root { --bar-h: 156px; }
+  :root { --bar-h: 114px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .card__inner, .progress__fill, .toast { transition: none; }
-  .feed { scroll-behavior: auto; }
+  .progress__fill, .toast { transition: none; }
+  .track { transition: none !important; }
 }
 
 

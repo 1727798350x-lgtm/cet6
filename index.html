@@ -25,16 +25,17 @@
 
   <button class="back-pill" id="backBtn" hidden>← 回到今天</button>
 
-  <!-- 卡片流：所有卡片由 app.js 生成 -->
-  <main class="feed" id="feed" aria-live="polite"></main>
+  <!-- 卡片流：所有卡片由 app.js 生成（track 由手势 transform 整屏平移） -->
+  <main class="feed" id="feed" aria-live="polite">
+    <div class="track" id="track"></div>
+  </main>
 
-  <!-- 底部三键 -->
+  <!-- 底部三键：记得 / 收藏 / 忘了 -->
   <footer class="actionbar">
-    <div class="hintline" id="keyHint">按感觉点一下，或直接上滑到下一个</div>
     <div class="keys is-locked" id="keys">
-      <button class="key key--again" data-rating="again" disabled>忘了</button>
-      <button class="key key--hard" data-rating="hard" disabled>模糊</button>
       <button class="key key--good" data-rating="good" disabled>记得</button>
+      <button class="key key--fav" id="favKey" data-action="fav" disabled>☆ 收藏</button>
+      <button class="key key--again" data-rating="again" disabled>忘了</button>
     </div>
   </footer>
 
