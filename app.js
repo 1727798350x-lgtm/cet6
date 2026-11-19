@@ -161,6 +161,31 @@ function saveState(state) {
 }
 
 /* ---------------- 词库校验 ---------------- */
+// 词性释义（defs）：词库新字段，形如 [{p:'n.', cn:['仇恨','憎恨']}, {p:'vt.', cn:['憎恨']}]。
+// 只为展示服务，所以坏数据一律丢：p 必须是字符串（可为空）、cn 必须是非空字符串数组；
+// 最多留 6 组、每组最多 3 条，单条去首尾空格。没给 defs（旧词库）就退化成一种词性。
+function normalizeDefs(w, cn) {
+  const out = [];
+  if (Array.isArray(w.defs)) {
+    for (let i = 0; i < w.defs.length && out.length < 6; i++) {
+      const d = w.defs[i];
+      if (!d || typeof d.p !== 'string' || !Array.isArray(d.cn)) continue;
+      const senses = [];
+      for (let j = 0; j < d.cn.length && senses.length < 3; j++) {
+        if (typeof d.cn[j] !== 'string') continue;
+        const s = d.cn[j].trim();
+        if (s) senses.push(s);
+      }
+      if (!senses.length) continue;
+      out.push({ p: d.p, cn: senses });
+    }
+  }
+  if (!out.length) {
+    out.push({ p: w.pos ? String(w.pos) : '', cn: cn.slice() });
+  }
+  return out;
+}
+
 function validateWords(raw) {
   if (!Array.isArray(raw)) return [];
   const out = [];
@@ -171,12 +196,14 @@ function validateWords(raw) {
     const id = String(w.id).trim();
     if (!id || seen[id]) continue;
     seen[id] = 1;
+    const cn = w.cn.map(String);
     out.push({
       id: id,
       w: String(w.w),
       ipa: w.ipa ? String(w.ipa) : '',
       pos: w.pos ? String(w.pos) : '',
-      cn: w.cn.map(String),
+      cn: cn,
+      defs: normalizeDefs(w, cn),
       ex: w.ex ? String(w.ex) : '',
       exCn: w.exCn ? String(w.exCn) : '',
       root: w.root ? String(w.root) : '',
@@ -462,6 +489,35 @@ function boot() {
   }
 
   /* ---------- 渲染 ---------- */
+  // 收藏表里的一行摘要：n. 命令；指挥 · vt. 命令（无 defs 时退回旧的 cn 拼接）
+  function defsSummary(w) {
+    const defs = (Array.isArray(w.defs) && w.defs.length) ? w.defs : null;
+    if (defs) {
+      return defs.map(function (d) {
+        return (d.p ? d.p + ' ' : '') + ((d.cn && d.cn.length) ? d.cn.join('；') : '');
+      }).join(' · ');
+    }
+    return (w.cn || []).join('；');
+  }
+
+  // 卡片上的词性块：每个词性一行（词性徽标 + 释义）。p 为空时只渲染释义、占满整行。
+  // 3 个词性以上加 --many：间距/字号略收，尽量一屏放得下；放不下时卡片内部滚动。
+  function defsHTML(w) {
+    const defs = (Array.isArray(w.defs) && w.defs.length)
+      ? w.defs
+      : [{ p: w.pos || '', cn: w.cn || [] }];
+    let rows = '';
+    for (let i = 0; i < defs.length; i++) {
+      const d = defs[i] || {};
+      const senses = (d.cn && d.cn.length) ? d.cn.join('；') : '';
+      rows += '<div class="def">' +
+        (d.p ? '<span class="def__pos">' + esc(d.p) + '</span>' : '') +
+        '<span class="def__cn">' + esc(senses) + '</span></div>';
+    }
+    return '<div class="card__defs' + (defs.length >= 3 ? ' card__defs--many' : '') + '">' +
+      rows + '</div>';
+  }
+
   // 卡片上只保留单词 / 音标 / 释义 / 例句等正文（收藏走底部键和收藏表）
   function cardHTML(w) {
     return '' +
@@ -470,8 +526,7 @@ function boot() {
           '<span class="card__word">' + esc(w.w) + '</span>' +
         '</div>' +
         '<div class="card__ipa">' + esc(w.ipa) + '</div>' +
-        (w.pos ? '<div class="card__pos">' + esc(w.pos) + '</div>' : '') +
-        '<div class="card__cn">' + esc(w.cn.join('；')) + '</div>' +
+        defsHTML(w) +
         (w.ex ? '<div class="card__rule"></div>' : '') +
         (w.ex ? '<div class="card__ex">' + esc(w.ex) + '</div>' : '') +
         (w.exCn ? '<div class="card__excn">' + esc(w.exCn) + '</div>' : '') +
@@ -777,7 +832,7 @@ function boot() {
         '<div class="favrow__main">' +
           '<div class="favrow__w">' + esc(w.w) +
             (w.ipa ? '<span class="favrow__ipa">' + esc(w.ipa) + '</span>' : '') + '</div>' +
-          '<div class="favrow__cn">' + esc(w.cn.join('；')) + '</div>' +
+          '<div class="favrow__cn">' + esc(defsSummary(w)) + '</div>' +
         '</div>' +
         '<button class="favrow__x" data-unfav="' + esc(id) + '" aria-label="取消收藏">★</button>' +
       '</div>';

@@ -175,18 +175,56 @@ body[data-fs="l"] { --fs: 1.12; }
   font-family: ui-monospace, Menlo, Consolas, monospace;
 }
 
-.card__pos {
-  margin-top: 22px;
-  font-size: calc(14px * var(--fs));
-  font-weight: 600;
-  color: var(--blue);
+/* 词性 + 释义：一种词性一行（旧版只显示 pos 那一种，信息太少） */
+.card__defs {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 20px;
 }
 
-.card__cn {
-  margin-top: 4px;
+.def {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+/* 词性徽标：固定宽、蓝色；行高跟释义首行一致，顶部对齐时不会悬在半空 */
+.def__pos {
+  flex: 0 0 2.9em;
+  max-width: 2.9em;
+  font-size: calc(14px * var(--fs));
+  font-weight: 600;
+  line-height: calc(23px * var(--fs) * 1.45);
+  color: var(--blue);
+  white-space: nowrap;
+}
+
+.def__cn {
+  flex: 1 1 auto;
+  min-width: 0;
   font-size: calc(23px * var(--fs));
   font-weight: 600;
   line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+/* 3 个词性以上（pop / arch / rank 这类）：间距和字号略收，尽量一屏放下 */
+.card__defs--many {
+  gap: 7px;
+  margin-top: 15px;
+}
+
+.card__defs--many .def__pos {
+  flex-basis: 2.7em;
+  max-width: 2.7em;
+  font-size: calc(13px * var(--fs));
+  line-height: calc(21px * var(--fs) * 1.4);
+}
+
+.card__defs--many .def__cn {
+  font-size: calc(21px * var(--fs));
+  line-height: 1.4;
 }
 
 .card__rule {
@@ -230,7 +268,9 @@ body[data-fs="l"] { --fs: 1.12; }
   display: grid;
   grid-template-columns: 1fr;
   gap: 10px;
-  max-width: 220px;
+  /* 底部收藏键铺满可用宽度（390 视口 ≈ 358px），太窄看着像次要按钮 */
+  width: 100%;
+  max-width: 480px;
   margin: 0 auto;
 }
 
