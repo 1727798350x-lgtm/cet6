@@ -11,9 +11,9 @@
 // 台阶：stage 0 → 1 天，1 → 2 天，……，6 → 30 天（封顶）
 const STEPS = [1, 2, 4, 7, 15, 30, 30];
 const KEY = 'cet6_progress_v1';
+const POS_KEY = 'cet6_pos_v1';   // 断点：上次看到的是哪张卡（单独存，滑动时写，体积很小）
 const MAX_CARDS = 6000;   // 词库只有几千词，等于不限
 const CHUNK = 24;
-const SOFT_GOAL = 200;    // 顶部进度条按 200 张填满，只是激励，不是上限
 const RATING_TEXT = { again: '忘了', hard: '模糊', good: '记得' };
 
 /* ---------------- 日期工具 ---------------- */
@@ -81,10 +81,13 @@ function buildQueue(words, state, today, dailyNew) {
   fresh.sort(function (a, b) { return (a.rank || 0) - (b.rank || 0); });
 
   // 「滑过去不算」：从上次刷到的位置继续，不用每次从头再来
+  // cursorRank = 上次看到的那张的 rank，用 >= 才包含它（否则每次重开都会跳过当时停在的那一张）；
+  // 游标走到词库末尾时，把前面的词接在后面，绕回开头继续。
   const cursor = Number(state.stats && state.stats.cursorRank) || 0;
   if (cursor > 0 && fresh.length) {
-    const after = fresh.filter(function (w) { return (w.rank || 0) > cursor; });
-    fresh = after.length ? after : fresh;
+    const after = fresh.filter(function (w) { return (w.rank || 0) >= cursor; });
+    const before = fresh.filter(function (w) { return (w.rank || 0) < cursor; });
+    if (after.length) fresh = after.concat(before);
   }
 
   const out = [];
@@ -121,6 +124,23 @@ function buildQueue(words, state, today, dailyNew) {
     res.push(id);
   }
   return res;
+}
+
+// 断点续刷：把当天队列「旋」到上次看到的那张开头。
+// 队列里的卡一张不少、相对顺序不变，只是从上次的位置开始循环。
+// pos = { id, rank }；找不到这张就按 rank 找最近的一张，都没有就从头开始。
+function rotateQueue(ids, byId, pos) {
+  if (!ids || !ids.length) return { queue: [], start: 0 };
+  let idx = -1;
+  if (pos && pos.id) idx = ids.indexOf(pos.id);
+  if (idx < 0 && pos && pos.rank) {
+    for (let i = 0; i < ids.length; i++) {
+      const w = byId[ids[i]];
+      if (w && (w.rank || 0) >= pos.rank) { idx = i; break; }
+    }
+  }
+  if (idx <= 0) return { queue: ids.slice(), start: 0 };
+  return { queue: ids.slice(idx).concat(ids.slice(0, idx)), start: idx };
 }
 
 // 还没学过的词里，按 rank 取 n 个（排除 exclude 里的）
@@ -274,13 +294,20 @@ function boot() {
     lock: false,
     toastTimer: 0,
     mode: 'today',
-    senseIndex: null
+    senseIndex: null,
+    resumeStart: 0,         // 本次打开是从队列第几张接上的（>0 说明队列被旋转过）
+    resumed: false          // 本次打开是否接着上次的位置继续
   };
 
   let saveTimer = 0;
+  let suppressFlush = false;   // 导入备份 / 清空进度后要 reload：别让 pagehide 把旧数据又写回去
   function saveSoon() {
     if (saveTimer) return;
     saveTimer = setTimeout(function () { saveTimer = 0; save(); }, 1000);
+  }
+
+  function flushSave() {
+    if (saveTimer) { clearTimeout(saveTimer); saveTimer = 0; save(); }
   }
 
   const keyBtns = Array.prototype.slice.call(keys.querySelectorAll('.key'));
@@ -292,15 +319,59 @@ function boot() {
     });
   }
 
-  function toast(msg) {
+  function toast(msg, ms) {
     toastEl.textContent = msg;
     toastEl.hidden = false;
     clearTimeout(model.toastTimer);
-    model.toastTimer = setTimeout(function () { toastEl.hidden = true; }, 1800);
+    model.toastTimer = setTimeout(function () { toastEl.hidden = true; }, ms || 1800);
   }
 
   function save() {
     if (!saveState(model.state)) toast('保存失败：存储空间可能已满，请先导出备份');
+  }
+
+  // localStorage 本身被禁用（无痕/隐私模式、被系统限制）时，进度一定留不住
+  function storageAvailable() {
+    try {
+      const k = '__cet6_probe__';
+      localStorage.setItem(k, '1');
+      localStorage.removeItem(k);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // 已学过的词数（累计，不按天清零）
+  function learnedCount() {
+    return Object.keys(model.state.words || {}).length;
+  }
+
+  /* ---------- 断点位置（单独的小 key，切换卡片时立即写） ---------- */
+  function readSavedPos() {
+    try {
+      const raw = localStorage.getItem(POS_KEY);
+      if (!raw) return null;
+      const p = JSON.parse(raw);
+      if (!p || typeof p !== 'object') return null;
+      const id = typeof p.id === 'string' ? p.id : '';
+      const rank = Number(p.rank) || 0;
+      if (!id && !rank) return null;
+      return { id: id, rank: rank };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function savePosNow() {
+    if (model.mode !== 'today') return;
+    const el = model.cards[model.active];
+    if (!el || !el.dataset.id) return;
+    const w = model.byId[el.dataset.id];
+    if (!w) return;
+    try {
+      localStorage.setItem(POS_KEY, JSON.stringify({ id: w.id, rank: w.rank || 0 }));
+    } catch (e) { /* 忽略：弹窗在别处提示 */ }
   }
 
   /* ---------- 发音 ---------- */
@@ -488,7 +559,8 @@ function boot() {
   }
 
   /* ---------- 渲染 ---------- */
-  function cardHTML(w, isFav) {
+  // isReview：这个词之前学过（今天又到期了），卡片上标「复习」，免得以为是「从头重来」
+  function cardHTML(w, isFav, isReview) {
     const svg = '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">' +
       '<path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor"/>' +
       '<path d="M16.5 8.5a5 5 0 0 1 0 7" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/>' +
@@ -498,7 +570,7 @@ function boot() {
       '<div class="card__body">' +
         '<div class="card__head">' +
           '<span class="card__word">' + esc(w.w) + '</span>' +
-          '<span class="card__flag" aria-hidden="true"></span>' +
+          '<span class="card__flag" aria-hidden="true">' + (isReview ? '复习' : '') + '</span>' +
           '<button class="fav' + (isFav ? ' is-on' : '') + '" data-fav="' + esc(w.id) + '" aria-label="收藏">' +
             (isFav ? '★' : '☆') + '</button>' +
           '<button class="speak" data-speak="' + esc(w.w) + '" aria-label="朗读单词">' + svg + '</button>' +
@@ -522,9 +594,11 @@ function boot() {
       const w = model.byId[model.queue[i]];
       if (!w) continue;
       const el = document.createElement('article');
-      el.className = 'card';
+      const p = model.state.words[w.id];
+      const isReview = !!(p && (p.seen || 0) > 0);
+      el.className = isReview ? 'card is-review' : 'card';
       el.dataset.id = w.id;
-      el.innerHTML = cardHTML(w, !!(model.state.favs && model.state.favs[w.id]));
+      el.innerHTML = cardHTML(w, !!(model.state.favs && model.state.favs[w.id]), isReview);
       frag.appendChild(el);
       model.cards.push(el);
     }
@@ -533,12 +607,16 @@ function boot() {
   }
 
   /* ---------- 顶部进度 ---------- */
+  // 左边「今天 · 11/19」，中间累计进度「已学 137 · 今日 8」，进度条按整个词库算
+  // —— 计数器不再每天归零，跨天也能看出来到底学了多少。
   function updateTop() {
     dayLabel.textContent = (model.mode === 'fav') ? '收藏夹' : ('今天 · ' + model.today.slice(5).replace('-', '/'));
     if (model.mode === 'fav') return;
     const done = countDoneToday(model.state, model.today);
-    countLabel.textContent = '已刷 ' + done + ' 张';
-    progressFill.style.width = Math.min(100, (done / SOFT_GOAL) * 100) + '%';
+    const learned = learnedCount();
+    countLabel.textContent = '已学 ' + learned + ' · 今日 ' + done;
+    const total = model.words.length || 0;
+    progressFill.style.width = (total ? Math.min(100, (learned / total) * 100) : 0) + '%';
   }
 
   function updateFavLabel() {
@@ -645,7 +723,10 @@ function boot() {
   function commitActive(index) {
     model.active = index;
     // 「滑过去不算」：只把浏览位置记下来，不写学习记录
-    if (model.mode === 'today') trackCursor();
+    if (model.mode === 'today') {
+      trackCursor();
+      savePosNow();   // 位置单独、立即写：刷两张就锁屏/杀掉 App 也不会丢
+    }
     updateKeys();
   }
 
@@ -830,6 +911,17 @@ function boot() {
     setFav(id, !(model.state.favs && model.state.favs[id]));
   }
 
+  // 生成「今天」的队列，并旋到上次看到的位置（断点续刷）
+  // resumed：这次打开确实是接上次的位置（而不是全新开始/什么都没做过）
+  function buildTodayQueue() {
+    const ids = buildQueue(model.words, model.state, model.today, model.state.settings.dailyNew);
+    const pos = readSavedPos();
+    const r = rotateQueue(ids, model.byId, pos);
+    const acted = learnedCount() > 0 || (Number(model.state.stats && model.state.stats.cursorRank) || 0) > 0;
+    r.resumed = !!(acted && pos && ((r.start > 0) || (r.queue.length > 0 && r.queue[0] === pos.id)));
+    return r;
+  }
+
   function loadQueue(ids) {
     model.queue = ids;
     model.rendered = 0;
@@ -864,7 +956,9 @@ function boot() {
     model.mode = 'today';
     $('backBtn').hidden = true;
     document.body.classList.remove('mode-fav');
-    loadQueue(buildQueue(model.words, model.state, model.today, model.state.settings.dailyNew));
+    const built = buildTodayQueue();
+    loadQueue(built.queue);
+    model.resumeStart = built.start;
     updateTop();
   }
 
@@ -936,6 +1030,8 @@ function boot() {
           throw new Error('bad file');
         }
         if (!confirm('导入会覆盖当前进度，确定吗？')) return;
+        suppressFlush = true;                       // 别让 pagehide 把旧进度写回去
+        try { localStorage.removeItem(POS_KEY); } catch (e) { /* 忽略 */ }
         localStorage.setItem(KEY, JSON.stringify(data));
         location.reload();
       } catch (e) {
@@ -962,6 +1058,17 @@ function boot() {
   window.addEventListener('resize', relayout);
   window.addEventListener('orientationchange', relayout);
   if (window.visualViewport) window.visualViewport.addEventListener('resize', relayout);
+
+  // 切后台 / 关页面（iOS 直接划掉、微信返回）时把待写的数据落盘，别丢最后几张
+  function flushAll() {
+    if (suppressFlush) return;
+    savePosNow();
+    flushSave();
+  }
+  window.addEventListener('pagehide', flushAll);
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'hidden') flushAll();
+  });
 
   feed.addEventListener('click', function (e) {
     if (view.dragging) return; // 正拖着卡片时另一根手指点的，忽略
@@ -1047,7 +1154,9 @@ function boot() {
   });
   $('resetBtn').addEventListener('click', function () {
     if (!confirm('清空所有学习进度？这个操作不能撤销，建议先导出备份。')) return;
+    suppressFlush = true;                       // 别让 pagehide 把旧进度写回去
     try { localStorage.removeItem(KEY); } catch (e) { /* 忽略 */ }
+    try { localStorage.removeItem(POS_KEY); } catch (e) { /* 忽略 */ }
     location.reload();
   });
 
@@ -1108,7 +1217,12 @@ function boot() {
       model.state.stats.todayTotal = 0;
     }
 
-    model.queue = buildQueue(words, model.state, model.today, model.state.settings.dailyNew);
+    // 队列照旧生成（复习词 + 新词），但会旋到上次看到的那张，
+    // 这样第二天打开也是「接着上次」，而不是从词库第一个词重新开始。
+    const built = buildTodayQueue();
+    model.queue = built.queue;
+    model.resumeStart = built.start;
+    model.resumed = built.resumed;
     if (!model.state.stats.todayTotal) {
       model.state.stats.todayTotal = model.queue.length + countDoneToday(model.state, model.today);
     }
@@ -1117,6 +1231,11 @@ function boot() {
     syncSettingsUI();
     updateFavLabel();
     updateTop();
+
+    // 存储被禁用（无痕/隐私模式）：进度注定留不住，直接说清楚
+    if (!storageAvailable()) {
+      toast('浏览器不允许保存进度（可能是无痕/隐私模式），这次学的关掉就没了', 6000);
+    }
 
     if (!model.queue.length) {
       showDone();
@@ -1127,7 +1246,15 @@ function boot() {
     model.active = 0;
     updateKeys();
     applyPos(0, false);
+    savePosNow();
     speakCurrent();
+    // 续刷时给个明确提示：不是从头开始，是接上次
+    if (model.resumed) {
+      const learned = learnedCount();
+      toast(learned > 0
+        ? ('接着上次的位置继续 · 已学 ' + learned + ' 词')
+        : '接着上次的位置继续', 2600);
+    }
   }
 
   init();
@@ -1152,6 +1279,7 @@ if (typeof module !== 'undefined' && module.exports) {
     applyRating: applyRating,
     markStudy: markStudy,
     buildQueue: buildQueue,
+    rotateQueue: rotateQueue,
     nextFreshIds: nextFreshIds,
     countDue: countDue,
     countDoneToday: countDoneToday,
