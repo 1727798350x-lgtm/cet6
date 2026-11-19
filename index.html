@@ -9,16 +9,17 @@
   <meta name="format-detection" content="telephone=no" />
   <title>刷六级 · 一屏一词</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%230E0F13'/%3E%3Ctext x='50' y='74' font-size='64' text-anchor='middle' fill='%23F2F3F5' font-family='Microsoft YaHei,sans-serif'%3E%E5%85%AD%3C/text%3E%3C/svg%3E" />
-  <link rel="stylesheet" href="style.css?v=20261119" />
+  <link rel="stylesheet" href="style.css?v=20261119b" />
 </head>
 <body data-fs="m">
 
-  <!-- 顶部：进度条 + 今日计数 -->
+  <!-- 顶部：学习进度条 + 已背/总数 + 今日 + 收藏表入口 -->
   <header class="topbar">
     <div class="progress"><div class="progress__fill" id="progressFill"></div></div>
     <div class="topbar__row">
-      <span id="dayLabel">今天</span>
-      <span id="countLabel">0 / 0</span>
+      <span id="dayLabel">0 / 0</span>
+      <span id="countLabel">今日 0</span>
+      <button class="fav-count" id="favCountBtn" aria-label="已收藏单词表">★ <span id="favCount">0</span></button>
       <button class="gear" id="gearBtn" aria-label="设置">⚙︎</button>
     </div>
   </header>
@@ -53,6 +54,20 @@
       <button class="btn btn--primary" id="moreBtn">再学 20 个新词</button>
       <button class="btn" id="closeDone">先休息</button>
       <p class="done__small">进度只存在这台手机里，记得每周导出一次备份</p>
+    </div>
+  </div>
+
+  <!-- 已收藏单词表 -->
+  <div class="screen sheet" id="favScreen" hidden>
+    <div class="sheet__panel" role="dialog" aria-label="已收藏单词表">
+      <div class="sheet__head">
+        <b id="favTitle">已收藏单词</b>
+        <button class="sheet__close" id="closeFavList">关闭</button>
+      </div>
+      <div class="favlist" id="favList"></div>
+      <div class="favlist__foot">
+        <button class="btn btn--primary" id="drillFavBtn">只刷这些词</button>
+      </div>
     </div>
   </div>
 
@@ -96,7 +111,7 @@
       </div>
 
       <div class="field">
-        <button class="btn" id="favBtn">收藏夹</button>
+        <button class="btn" id="favBtn">已收藏单词表</button>
       </div>
 
       <div class="field field--row">
@@ -118,6 +133,6 @@
   <input type="file" id="importFile" accept="application/json,.json" hidden />
 
   <script src="words.js"></script>
-  <script src="app.js?v=20261119"></script>
+  <script src="app.js?v=20261119b"></script>
 </body>
 </html>

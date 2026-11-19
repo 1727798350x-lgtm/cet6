@@ -560,20 +560,13 @@ function boot() {
 
   /* ---------- 渲染 ---------- */
   // isReview：这个词之前学过（今天又到期了），卡片上标「复习」，免得以为是「从头重来」
-  function cardHTML(w, isFav, isReview) {
-    const svg = '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">' +
-      '<path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor"/>' +
-      '<path d="M16.5 8.5a5 5 0 0 1 0 7" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/>' +
-      '<path d="M19 6a8.5 8.5 0 0 1 0 12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/>' +
-      '</svg>';
+  // 卡片上只保留单词 / 音标 / 释义 / 例句等正文，不再放收藏和喇叭按钮（收藏走底部键和收藏表）
+  function cardHTML(w, isReview) {
     return '' +
       '<div class="card__body">' +
         '<div class="card__head">' +
           '<span class="card__word">' + esc(w.w) + '</span>' +
           '<span class="card__flag" aria-hidden="true">' + (isReview ? '复习' : '') + '</span>' +
-          '<button class="fav' + (isFav ? ' is-on' : '') + '" data-fav="' + esc(w.id) + '" aria-label="收藏">' +
-            (isFav ? '★' : '☆') + '</button>' +
-          '<button class="speak" data-speak="' + esc(w.w) + '" aria-label="朗读单词">' + svg + '</button>' +
         '</div>' +
         '<div class="card__ipa">' + esc(w.ipa) + '</div>' +
         (w.pos ? '<div class="card__pos">' + esc(w.pos) + '</div>' : '') +
@@ -598,7 +591,7 @@ function boot() {
       const isReview = !!(p && (p.seen || 0) > 0);
       el.className = isReview ? 'card is-review' : 'card';
       el.dataset.id = w.id;
-      el.innerHTML = cardHTML(w, !!(model.state.favs && model.state.favs[w.id]), isReview);
+      el.innerHTML = cardHTML(w, isReview);
       frag.appendChild(el);
       model.cards.push(el);
     }
@@ -607,23 +600,27 @@ function boot() {
   }
 
   /* ---------- 顶部进度 ---------- */
-  // 左边「今天 · 11/19」，中间累计进度「已学 137 · 今日 8」，进度条按整个词库算
-  // —— 计数器不再每天归零，跨天也能看出来到底学了多少。
+  // 左边「已背 137 / 5407」，右边「今日 8」，进度条按整个词库算。
+  // —— 去掉日期，让累计进度一眼可见，跨天也不归零。
   function updateTop() {
-    dayLabel.textContent = (model.mode === 'fav') ? '收藏夹' : ('今天 · ' + model.today.slice(5).replace('-', '/'));
-    if (model.mode === 'fav') return;
+    if (model.mode === 'fav') {
+      dayLabel.textContent = '收藏夹';
+      return;
+    }
     const done = countDoneToday(model.state, model.today);
     const learned = learnedCount();
-    countLabel.textContent = '已学 ' + learned + ' · 今日 ' + done;
     const total = model.words.length || 0;
+    dayLabel.textContent = '已背 ' + learned + ' / ' + total;
+    countLabel.textContent = '今日 ' + done;
     progressFill.style.width = (total ? Math.min(100, (learned / total) * 100) : 0) + '%';
   }
 
   function updateFavLabel() {
-    const b = $('favBtn');
-    if (!b) return;
     const n = Object.keys(model.state.favs || {}).length;
-    b.textContent = n ? '收藏夹（' + n + ' 个词）' : '收藏夹（还没有收藏）';
+    const b = $('favBtn');
+    if (b) b.textContent = n ? '已收藏单词表（' + n + ' 个词）' : '已收藏单词表（空）';
+    const c = $('favCount');
+    if (c) c.textContent = n;
   }
 
   /* ---------- 三键状态 ---------- */
@@ -890,14 +887,6 @@ function boot() {
     if (!id) return;
     model.state.favs = model.state.favs || {};
     if (on) model.state.favs[id] = true; else delete model.state.favs[id];
-    const el = model.cards[model.active];
-    if (el && el.dataset.id === id) {
-      const b = el.querySelector('.fav');
-      if (b) {
-        b.textContent = on ? '★' : '☆';
-        b.classList.toggle('is-on', on);
-      }
-    }
     save();
     updateFavLabel();
     updateFavKey();
@@ -905,10 +894,56 @@ function boot() {
     toast(on ? '已收藏 ' + (w ? w.w : id) : '已取消收藏');
   }
 
-  function toggleFavBtn(btn) {
-    const id = btn.dataset.fav;
-    if (!id) return;
-    setFav(id, !(model.state.favs && model.state.favs[id]));
+  /* ---------- 已收藏单词表 ---------- */
+  function favIds() {
+    const favs = model.state.favs || {};
+    const ids = Object.keys(favs).filter(function (id) { return !!model.byId[id]; });
+    ids.sort(function (a, b) { return (model.byId[a].rank || 0) - (model.byId[b].rank || 0); });
+    return ids;
+  }
+
+  function renderFavList() {
+    const box = $('favList');
+    if (!box) return;
+    const ids = favIds();
+    $('favTitle').textContent = ids.length ? '已收藏单词（' + ids.length + ' 个）' : '已收藏单词';
+    const drill = $('drillFavBtn');
+    if (drill) drill.hidden = (model.mode === 'fav');
+    if (!ids.length) {
+      box.innerHTML = '<p class="favlist__empty">还没有收藏任何单词。在卡片下方点「☆ 收藏」，这里就会列出收藏过的词。</p>';
+      if (drill) drill.hidden = true;
+      return;
+    }
+    box.innerHTML = ids.map(function (id) {
+      const w = model.byId[id];
+      return '<div class="favrow" data-id="' + esc(id) + '">' +
+        '<div class="favrow__main">' +
+          '<div class="favrow__w">' + esc(w.w) +
+            (w.ipa ? '<span class="favrow__ipa">' + esc(w.ipa) + '</span>' : '') + '</div>' +
+          '<div class="favrow__cn">' + esc(w.cn.join('；')) + '</div>' +
+        '</div>' +
+        '<button class="favrow__x" data-unfav="' + esc(id) + '" aria-label="取消收藏">★</button>' +
+      '</div>';
+    }).join('');
+  }
+
+  function openFavList() {
+    renderFavList();
+    $('settings').hidden = true;
+    $('favScreen').hidden = false;
+  }
+
+  function closeFavList() {
+    $('favScreen').hidden = true;
+  }
+
+  // 点收藏表里的一行：回到队列里的那张卡
+  function jumpToWord(id) {
+    const idx = model.queue.indexOf(id);
+    if (idx < 0) { toast('这个词不在这次的队列里'); return; }
+    closeFavList();
+    while (model.rendered <= idx && model.rendered < model.queue.length) renderChunk();
+    goTo(idx, true);
   }
 
   // 生成「今天」的队列，并旋到上次看到的位置（断点续刷）
@@ -940,7 +975,7 @@ function boot() {
   function enterFav() {
     model.state.favs = model.state.favs || {};
     const ids = Object.keys(model.state.favs).filter(function (id) { return !!model.byId[id]; });
-    if (!ids.length) { toast('还没有收藏的词：点卡片右上角 ☆'); return; }
+    if (!ids.length) { toast('还没有收藏的词：在卡片下方点「☆ 收藏」'); return; }
     ids.sort(function (a, b) { return (model.byId[a].rank || 0) - (model.byId[b].rank || 0); });
     model.mode = 'fav';
     $('settings').hidden = true;
@@ -1070,22 +1105,6 @@ function boot() {
     if (document.visibilityState === 'hidden') flushAll();
   });
 
-  feed.addEventListener('click', function (e) {
-    if (view.dragging) return; // 正拖着卡片时另一根手指点的，忽略
-    const favBtn = e.target.closest('.fav');
-    if (favBtn) {
-      e.stopPropagation();
-      toggleFavBtn(favBtn);
-      return;
-    }
-    const speakBtn = e.target.closest('.speak');
-    if (speakBtn) {
-      e.stopPropagation();
-      speak(speakBtn.dataset.speak);
-      return;
-    }
-  });
-
   keys.addEventListener('click', function (e) {
     if (view.dragging) return;
     const btn = e.target.closest('.key');
@@ -1103,7 +1122,32 @@ function boot() {
     updateFavLabel();
     $('settings').hidden = false;
   });
-  $('favBtn').addEventListener('click', enterFav);
+  $('favBtn').addEventListener('click', openFavList);
+  $('favCountBtn').addEventListener('click', openFavList);
+  $('closeFavList').addEventListener('click', closeFavList);
+  $('favScreen').addEventListener('click', function (e) {
+    if (e.target.id === 'favScreen') closeFavList();
+  });
+  $('favList').addEventListener('click', function (e) {
+    const x = e.target.closest('[data-unfav]');
+    if (x) {
+      e.stopPropagation();
+      setFav(x.dataset.unfav, false);
+      renderFavList();
+      // 收藏夹模式里把最后一个收藏也取消了：直接退回今天的队列
+      if (model.mode === 'fav' && favIds().length === 0) {
+        closeFavList();
+        exitFav();
+      }
+      return;
+    }
+    const row = e.target.closest('.favrow');
+    if (row && row.dataset.id) jumpToWord(row.dataset.id);
+  });
+  $('drillFavBtn').addEventListener('click', function () {
+    closeFavList();
+    enterFav();
+  });
   $('backBtn').addEventListener('click', exitFav);
   $('closeSettings').addEventListener('click', function () {
     $('settings').hidden = true;
