@@ -1,20 +1,16 @@
 /* ===================================================================
  * 刷六级 · 单词信息流
- * 主逻辑：队列 / 台阶式间隔重复 / 本地存储 / 渲染 / 交互
+ * 主逻辑：队列 / 滑过即背 / 本地存储 / 渲染 / 交互
  * -------------------------------------------------------------------
- * 纯逻辑函数（todayStr / addDays / applyRating / buildQueue ...）
+ * 纯逻辑函数（todayStr / addDays / markLearned / buildQueue ...）
  * 不依赖 DOM，可在 Node 里单独测试（见文件末尾的 module.exports）。
  * =================================================================== */
 'use strict';
 
 /* ---------------- 常量 ---------------- */
-// 台阶：stage 0 → 1 天，1 → 2 天，……，6 → 30 天（封顶）
-const STEPS = [1, 2, 4, 7, 15, 30, 30];
 const KEY = 'cet6_progress_v1';
 const POS_KEY = 'cet6_pos_v1';   // 断点：上次看到的是哪张卡（单独存，滑动时写，体积很小）
-const MAX_CARDS = 6000;   // 词库只有几千词，等于不限
 const CHUNK = 24;
-const RATING_TEXT = { again: '忘了', hard: '模糊', good: '记得' };
 
 /* ---------------- 日期工具 ---------------- */
 function pad2(n) { return n < 10 ? '0' + n : '' + n; }
@@ -29,32 +25,22 @@ function addDays(dateStr, n) {
   return todayStr(new Date(p[0], p[1] - 1, p[2] + n));
 }
 
-/* ---------------- 台阶算法 ---------------- */
-function intervalOf(stage) {
-  const s = Math.min(Math.max(stage, 0), STEPS.length - 1);
-  return STEPS[s];
-}
-
-function ratingToStage(cur, rating) {
-  if (rating === 'again') return 0;
-  if (rating === 'hard') return cur < 0 ? 0 : cur;
-  return Math.min(STEPS.length - 1, cur + 1); // good：升一级
-}
-
-// 就地更新 state.words[id]，返回该词的进度对象
-function applyRating(state, id, rating, today) {
+/* ---------------- 学习记录 ---------------- */
+// 滑过一张卡 = 背过这个词。只记「看过几次」和「最近一次是哪天」，不排复习计划。
+function markLearned(state, id, today) {
   let p = state.words[id];
-  if (!p) {
-    p = state.words[id] = { stage: -1, due: today, seen: 0, lapses: 0, last: '' };
-  }
+  if (!p) p = state.words[id] = { seen: 0, last: '' };
   p.seen = (p.seen || 0) + 1;
   p.last = today;
-  if (rating === 'again') p.lapses = (p.lapses || 0) + 1;
-  p.stage = ratingToStage(typeof p.stage === 'number' ? p.stage : -1, rating);
-  p.due = addDays(today, intervalOf(p.stage));
   return p;
 }
 
+// 已背过的词数（累计，不按天清零）
+function learnedCount(state) {
+  return Object.keys((state && state.words) || {}).length;
+}
+
+// 记录连续学习天数（同一天只算一次）
 function markStudy(state, today) {
   const st = state.stats;
   if (st.lastStudy === today) return;
@@ -64,66 +50,15 @@ function markStudy(state, today) {
 }
 
 /* ---------------- 队列 ---------------- */
-function buildQueue(words, state, today, dailyNew) {
-  const due = [];
-  let fresh = [];
+// 队列里只放还没滑过的词（滑过就算背过，不再出现），按词库的 rank 顺序。
+// dailyNew > 0 时，这一轮只放前 N 个，学完可以点「再学 20 个新词」继续。
+function buildQueue(words, state, dailyNew) {
+  const ids = [];
   for (let i = 0; i < words.length; i++) {
     const w = words[i];
-    const p = state.words[w.id];
-    if (!p) fresh.push(w);
-    else if (p.due <= today) due.push({ id: w.id, stage: p.stage || 0, due: p.due });
+    if (!state.words[w.id]) ids.push(w.id);
   }
-  // 超期最久的先复习；同一天到期的，台阶高的先上（先给正反馈）
-  due.sort(function (a, b) {
-    if (a.due !== b.due) return a.due < b.due ? -1 : 1;
-    return (b.stage || 0) - (a.stage || 0);
-  });
-  fresh.sort(function (a, b) { return (a.rank || 0) - (b.rank || 0); });
-
-  // 「滑过去不算」：从上次刷到的位置继续，不用每次从头再来
-  // cursorRank = 上次看到的那张的 rank，用 >= 才包含它（否则每次重开都会跳过当时停在的那一张）；
-  // 游标走到词库末尾时，把前面的词接在后面，绕回开头继续。
-  const cursor = Number(state.stats && state.stats.cursorRank) || 0;
-  if (cursor > 0 && fresh.length) {
-    const after = fresh.filter(function (w) { return (w.rank || 0) >= cursor; });
-    const before = fresh.filter(function (w) { return (w.rank || 0) < cursor; });
-    if (after.length) fresh = after.concat(before);
-  }
-
-  const out = [];
-
-  // 前 3 张：最熟的复习词
-  const warm = due.slice().sort(function (a, b) {
-    return (b.stage || 0) - (a.stage || 0);
-  }).slice(0, 3).map(function (x) { return x.id; });
-  warm.forEach(function (id) { out.push(id); });
-
-  const restDue = due.map(function (x) { return x.id; }).filter(function (id) {
-    return warm.indexOf(id) === -1;
-  });
-  // dailyNew <= 0 表示不限：新词全部进队列
-  const newIds = (dailyNew > 0 ? fresh.slice(0, dailyNew) : fresh).map(function (w) { return w.id; });
-
-  let di = 0, ni = 0;
-  // 复习 : 新词 = 2 : 1
-  while (di < restDue.length && ni < newIds.length) {
-    out.push(restDue[di++]);
-    if (di < restDue.length) out.push(restDue[di++]);
-    out.push(newIds[ni++]);
-  }
-  while (di < restDue.length) out.push(restDue[di++]);
-  while (ni < newIds.length) out.push(newIds[ni++]);
-
-  // 去重 + 截断
-  const seen = Object.create(null);
-  const res = [];
-  for (let i = 0; i < out.length && res.length < MAX_CARDS; i++) {
-    const id = out[i];
-    if (seen[id]) continue;
-    seen[id] = 1;
-    res.push(id);
-  }
-  return res;
+  return dailyNew > 0 ? ids.slice(0, dailyNew) : ids;
 }
 
 // 断点续刷：把当天队列「旋」到上次看到的那张开头。
@@ -143,7 +78,7 @@ function rotateQueue(ids, byId, pos) {
   return { queue: ids.slice(idx).concat(ids.slice(0, idx)), start: idx };
 }
 
-// 还没学过的词里，按 rank 取 n 个（排除 exclude 里的）
+// 还没滑过的词里，按 rank 取 n 个（排除 exclude 里的）
 function nextFreshIds(words, state, exclude, n) {
   const skip = Object.create(null);
   (exclude || []).forEach(function (id) { skip[id] = 1; });
@@ -158,16 +93,6 @@ function nextFreshIds(words, state, exclude, n) {
   return res;
 }
 
-// 到期日 <= date 的词数
-function countDue(words, state, date) {
-  let n = 0;
-  for (let i = 0; i < words.length; i++) {
-    const p = state.words[words[i].id];
-    if (p && p.due <= date) n++;
-  }
-  return n;
-}
-
 function countDoneToday(state, today) {
   let n = 0;
   for (const id in state.words) {
@@ -179,10 +104,10 @@ function countDoneToday(state, today) {
 /* ---------------- 存储 ---------------- */
 function defaultState() {
   return {
-    version: 1,
+    version: 2,
     updatedAt: '',
     settings: { dailyNew: 0, fontSize: 'm', onlineAudio: true },  // dailyNew 0 = 不限；onlineAudio = 系统语音不可用时联网发音
-    stats: { streak: 0, lastStudy: '', lastDay: '', todayTotal: 0, cursorRank: 0 },
+    stats: { streak: 0, lastStudy: '', lastDay: '' },
     favs: {},
     words: {}
   };
@@ -197,29 +122,26 @@ function loadState() {
     if (!s || typeof s !== 'object' || !s.words || typeof s.words !== 'object') return defaultState();
     const d = defaultState();
     const out = {
-      version: 1,
+      version: 2,
       updatedAt: s.updatedAt || '',
       settings: Object.assign({}, d.settings, s.settings || {}),
       stats: Object.assign({}, d.stats, s.stats || {}),
       favs: (s.favs && typeof s.favs === 'object') ? s.favs : {},
       words: s.words
     };
-    // 清洗：坏数据不拖垮整个 App
+    // 清洗：坏数据不拖垮整个 App。
+    // 旧版存的是间隔复习记录（stage / due / lapses）：只保留「学过」和「最近一天」，
+    // 复习排期直接丢掉——这一版滑过就算背过，不再安排复习。
     for (const id in out.words) {
       const p = out.words[id];
-      if (!p || typeof p !== 'object' || typeof p.due !== 'string') { delete out.words[id]; continue; }
+      if (!p || typeof p !== 'object') { delete out.words[id]; continue; }
       out.words[id] = {
-        stage: typeof p.stage === 'number' ? p.stage : 0,
-        due: p.due,
-        seen: p.seen || 0,
-        lapses: p.lapses || 0,
-        last: p.last || '',
-        fav: !!p.fav
+        seen: Number(p.seen) || 1,
+        last: typeof p.last === 'string' ? p.last : ''
       };
     }
     if (['s', 'm', 'l'].indexOf(out.settings.fontSize) === -1) out.settings.fontSize = 'm';
     out.settings.onlineAudio = out.settings.onlineAudio !== false;
-    out.stats.cursorRank = Number(out.stats.cursorRank) || 0;
     const dn = Number(out.settings.dailyNew);
     out.settings.dailyNew = (isFinite(dn) && dn >= 0) ? Math.min(500, dn) : 0;
     return out;
@@ -275,7 +197,6 @@ function boot() {
   const $ = function (id) { return document.getElementById(id); };
   const feed = $('feed');
   const track = $('track');
-  const keys = $('keys');
   const favKey = $('favKey');
   const progressFill = $('progressFill');
   const countLabel = $('countLabel');
@@ -291,26 +212,13 @@ function boot() {
     active: -1,
     state: null,
     today: '',
-    lock: false,
     toastTimer: 0,
     mode: 'today',
     senseIndex: null,
-    resumeStart: 0,         // 本次打开是从队列第几张接上的（>0 说明队列被旋转过）
     resumed: false          // 本次打开是否接着上次的位置继续
   };
 
-  let saveTimer = 0;
   let suppressFlush = false;   // 导入备份 / 清空进度后要 reload：别让 pagehide 把旧数据又写回去
-  function saveSoon() {
-    if (saveTimer) return;
-    saveTimer = setTimeout(function () { saveTimer = 0; save(); }, 1000);
-  }
-
-  function flushSave() {
-    if (saveTimer) { clearTimeout(saveTimer); saveTimer = 0; save(); }
-  }
-
-  const keyBtns = Array.prototype.slice.call(keys.querySelectorAll('.key'));
 
   /* ---------- 小工具 ---------- */
   function esc(s) {
@@ -340,11 +248,6 @@ function boot() {
     } catch (e) {
       return false;
     }
-  }
-
-  // 已学过的词数（累计，不按天清零）
-  function learnedCount() {
-    return Object.keys(model.state.words || {}).length;
   }
 
   /* ---------- 断点位置（单独的小 key，切换卡片时立即写） ---------- */
@@ -559,14 +462,12 @@ function boot() {
   }
 
   /* ---------- 渲染 ---------- */
-  // isReview：这个词之前学过（今天又到期了），卡片上标「复习」，免得以为是「从头重来」
-  // 卡片上只保留单词 / 音标 / 释义 / 例句等正文，不再放收藏和喇叭按钮（收藏走底部键和收藏表）
-  function cardHTML(w, isReview) {
+  // 卡片上只保留单词 / 音标 / 释义 / 例句等正文（收藏走底部键和收藏表）
+  function cardHTML(w) {
     return '' +
       '<div class="card__body">' +
         '<div class="card__head">' +
           '<span class="card__word">' + esc(w.w) + '</span>' +
-          '<span class="card__flag" aria-hidden="true">' + (isReview ? '复习' : '') + '</span>' +
         '</div>' +
         '<div class="card__ipa">' + esc(w.ipa) + '</div>' +
         (w.pos ? '<div class="card__pos">' + esc(w.pos) + '</div>' : '') +
@@ -587,11 +488,9 @@ function boot() {
       const w = model.byId[model.queue[i]];
       if (!w) continue;
       const el = document.createElement('article');
-      const p = model.state.words[w.id];
-      const isReview = !!(p && (p.seen || 0) > 0);
-      el.className = isReview ? 'card is-review' : 'card';
+      el.className = 'card';
       el.dataset.id = w.id;
-      el.innerHTML = cardHTML(w, isReview);
+      el.innerHTML = cardHTML(w);
       frag.appendChild(el);
       model.cards.push(el);
     }
@@ -600,17 +499,17 @@ function boot() {
   }
 
   /* ---------- 顶部进度 ---------- */
-  // 左边「已背 137 / 5407」，右边「今日 8」，进度条按整个词库算。
-  // —— 去掉日期，让累计进度一眼可见，跨天也不归零。
+  // 左上角「已滑过 137 / 5407」：滑过一张就算背过一个词，累计不按天清零。
+  // 右边「今日 8」是今天滑过的词数（同一个词一天只算一次），进度条按整个词库算。
   function updateTop() {
     if (model.mode === 'fav') {
       dayLabel.textContent = '收藏夹';
       return;
     }
     const done = countDoneToday(model.state, model.today);
-    const learned = learnedCount();
+    const learned = learnedCount(model.state);
     const total = model.words.length || 0;
-    dayLabel.textContent = '已背 ' + learned + ' / ' + total;
+    dayLabel.textContent = '已滑过 ' + learned + ' / ' + total;
     countLabel.textContent = '今日 ' + done;
     progressFill.style.width = (total ? Math.min(100, (learned / total) * 100) : 0) + '%';
   }
@@ -623,13 +522,6 @@ function boot() {
     if (c) c.textContent = n;
   }
 
-  /* ---------- 三键状态 ---------- */
-  function updateKeys() {
-    keys.classList.remove('is-locked');
-    keyBtns.forEach(function (b) { b.disabled = false; });
-    updateFavKey();
-  }
-
   function updateFavKey() {
     if (!favKey) return;
     const el = model.cards[model.active];
@@ -639,26 +531,16 @@ function boot() {
     favKey.textContent = on ? '★ 已收藏' : '☆ 收藏';
   }
 
-  /* ---------- 卡片交互 ---------- */
-  function applyRate(el, rating) {
-    const id = el.dataset.id;
-    applyRating(model.state, id, rating, model.today);
+  /* ---------- 滑过 = 背过 ---------- */
+  // 往前滑走一张卡时调用：把这张卡记为「已滑过」。
+  // 立即落盘（一张约几百字节的增量，但整个进度一起写），保证「已滑过」和断点位置一致：
+  // 万一这时被强杀，重开也不会漏词、更不会把已经滑过的词又推一遍。
+  function markCard(el) {
+    if (model.mode !== 'today' || !el || !el.dataset.id) return;
+    markLearned(model.state, el.dataset.id, model.today);
     markStudy(model.state, model.today);
-    el.classList.add('is-rated', 'flag-' + rating);
-    el.dataset.rating = rating;
-    const flag = el.querySelector('.card__flag');
-    if (flag) flag.textContent = RATING_TEXT[rating];
     save();
     updateTop();
-
-    // 答错的词：当天再来一次（排到队列末尾，不会打乱已经在滑的卡片）
-    if (rating === 'again') {
-      const later = model.queue.indexOf(id, model.active + 1);
-      if (later === -1) {
-        model.queue.push(id);
-        if (model.rendered >= model.queue.length - 1) renderChunk();
-      }
-    }
   }
 
   /* ---------- 平移引擎：一屏一张，滑一下就切一张 ---------- */
@@ -706,56 +588,31 @@ function boot() {
     return el ? el.querySelector('.card__body') : null;
   }
 
-  function trackCursor() {
-    const el = model.cards[model.active];
-    if (!el || el.classList.contains('is-rated')) return;
-    const w = model.byId[el.dataset.id];
-    if (!w) return;
-    if (!model.state.words[w.id] && (w.rank || 0) > (model.state.stats.cursorRank || 0)) {
-      model.state.stats.cursorRank = w.rank || 0;
-      saveSoon();
-    }
-  }
-
-  function commitActive(index) {
-    model.active = index;
-    // 「滑过去不算」：只把浏览位置记下来，不写学习记录
-    if (model.mode === 'today') {
-      trackCursor();
-      savePosNow();   // 位置单独、立即写：刷两张就锁屏/杀掉 App 也不会丢
-    }
-    updateKeys();
-  }
-
-  // 切到第 index 张：renderChunk 预渲染、按钮状态、自动发音都在这里
+  // 切到第 index 张：往前滑就把滑走的那张记为「已背过」；
+  // 滑过最后一张 = 这一轮刷完，弹完成页。
   function goTo(index, animate) {
     if (!model.cards.length) { applyPos(0, false); return; }
+
+    // 队列还有没渲染的卡：先补渲染，别把「渲染分块」当成刷完了
+    if (index >= model.cards.length && model.rendered < model.queue.length) renderChunk();
+
+    if (index >= model.cards.length) {
+      if (model.mode !== 'today') { toast('收藏夹到头了，点左上角回到今天'); return; }
+      markCard(model.cards[model.cards.length - 1]);   // 最后一张也算滑过
+      showDone();
+      return;
+    }
+
     const target = Math.max(0, Math.min(model.cards.length - 1, index));
+    if (target > model.active) markCard(model.cards[model.active]);
+    if (target + 6 >= model.rendered && model.rendered < model.queue.length) renderChunk();
     if (target !== model.active) {
-      if (target + 6 >= model.rendered && model.rendered < model.queue.length) renderChunk();
-      commitActive(target);
+      model.active = target;
+      if (model.mode === 'today') savePosNow();   // 位置单独、立即写：刷两张就锁屏/杀掉 App 也不会丢
+      updateFavKey();
       speakCurrent();
     }
     applyPos(target, animate !== false);
-  }
-
-  function rate(rating) {
-    if (model.lock || view.dragging) return;
-    const el = model.cards[model.active];
-    if (!el) return;
-    applyRate(el, rating);
-    model.lock = true;
-    setTimeout(function () { model.lock = false; }, 320);
-
-    const next = model.active + 1;
-    if (next < model.queue.length) {
-      if (next >= model.rendered) renderChunk();
-      goTo(next, true);
-    } else if (model.mode === 'fav') {
-      toast('收藏夹到头了，点左上角回到今天');
-    } else {
-      setTimeout(showDone, 300);
-    }
   }
 
   /* ---------- 手势：上滑 → 下一个词（下滑回上一个） ---------- */
@@ -946,14 +803,13 @@ function boot() {
     goTo(idx, true);
   }
 
-  // 生成「今天」的队列，并旋到上次看到的位置（断点续刷）
+  // 生成这一轮的队列（只含没滑过的词），并旋到上次看到的位置（断点续刷）
   // resumed：这次打开确实是接上次的位置（而不是全新开始/什么都没做过）
   function buildTodayQueue() {
-    const ids = buildQueue(model.words, model.state, model.today, model.state.settings.dailyNew);
+    const ids = buildQueue(model.words, model.state, model.state.settings.dailyNew);
     const pos = readSavedPos();
     const r = rotateQueue(ids, model.byId, pos);
-    const acted = learnedCount() > 0 || (Number(model.state.stats && model.state.stats.cursorRank) || 0) > 0;
-    r.resumed = !!(acted && pos && ((r.start > 0) || (r.queue.length > 0 && r.queue[0] === pos.id)));
+    r.resumed = !!(pos && r.queue.length && (r.start > 0 || r.queue[0] === pos.id));
     return r;
   }
 
@@ -967,7 +823,7 @@ function boot() {
     view.pitch = 0;
     if (!ids.length) { applyPos(0, false); return; }
     renderChunk();
-    updateKeys();
+    updateFavKey();
     applyPos(0, false);
     speakCurrent();
   }
@@ -993,30 +849,32 @@ function boot() {
     document.body.classList.remove('mode-fav');
     const built = buildTodayQueue();
     loadQueue(built.queue);
-    model.resumeStart = built.start;
     updateTop();
   }
 
   /* ---------- 完成页 ---------- */
+  // 滑过最后一张 / 词库全部滑完时出现：告诉用户已滑过多少、还剩多少。
   function showDone() {
-    const done = countDoneToday(model.state, model.today);
-    const dueTomorrow = countDue(model.words, model.state, addDays(model.today, 1));
-    $('doneCount').textContent = done;
+    const learned = learnedCount(model.state);
+    const total = model.words.length || 0;
+    const left = Math.max(0, total - learned);
+    $('doneCount').textContent = countDoneToday(model.state, model.today);
     $('doneStreak').textContent = model.state.stats.streak || 0;
-    $('doneDue').textContent = dueTomorrow;
-    $('doneTip').textContent = dueTomorrow > 0
-      ? '明天有 ' + dueTomorrow + ' 个词会到期，别断。'
-      : '明天没有到期的词，可以只学新词。';
+    $('doneLeft').textContent = left;
+    $('doneTitle').textContent = left ? '这一轮刷完了' : '词库全部刷完了';
+    $('doneTip').textContent = left
+      ? '还有 ' + left + ' 个词没滑过。想接着刷，点下面「再学 20 个新词」；不想刷了就明天再来。'
+      : '词库里的 ' + total + ' 个词都滑过一遍了。想从头再来：齿轮 → 清空全部进度。';
+    $('moreBtn').hidden = left === 0;
     $('doneScreen').hidden = false;
     updateTop();
   }
 
   function moreWords(n) {
     const ids = nextFreshIds(model.words, model.state, model.queue, n);
-    if (!ids.length) { toast('词库里的词都学过了，去 words.js 里加词吧'); return; }
+    if (!ids.length) { toast('词库里的词都滑过了，想重新来一遍：齿轮 → 清空全部进度'); return; }
     const start = model.queue.length;
     model.queue = model.queue.concat(ids);
-    model.state.stats.todayTotal = (model.state.stats.todayTotal || 0) + ids.length;
     save();
     $('doneScreen').hidden = true;
     renderChunk();
@@ -1094,28 +952,23 @@ function boot() {
   window.addEventListener('orientationchange', relayout);
   if (window.visualViewport) window.visualViewport.addEventListener('resize', relayout);
 
-  // 切后台 / 关页面（iOS 直接划掉、微信返回）时把待写的数据落盘，别丢最后几张
+  // 切后台 / 关页面（iOS 直接划掉、微信返回）时把位置落盘，别丢最后一张
   function flushAll() {
     if (suppressFlush) return;
     savePosNow();
-    flushSave();
+    save();
   }
   window.addEventListener('pagehide', flushAll);
   document.addEventListener('visibilitychange', function () {
     if (document.visibilityState === 'hidden') flushAll();
   });
 
-  keys.addEventListener('click', function (e) {
+  if (favKey) favKey.addEventListener('click', function () {
     if (view.dragging) return;
-    const btn = e.target.closest('.key');
-    if (!btn) return;
-    if (btn.dataset.rating) { rate(btn.dataset.rating); return; }
-    if (btn.dataset.action === 'fav') {
-      const el = model.cards[model.active];
-      if (!el) return;
-      const id = el.dataset.id;
-      setFav(id, !(model.state.favs && model.state.favs[id]));
-    }
+    const el = model.cards[model.active];
+    if (!el) return;
+    const id = el.dataset.id;
+    setFav(id, !(model.state.favs && model.state.favs[id]));
   });
 
   $('gearBtn').addEventListener('click', function () {
@@ -1162,7 +1015,7 @@ function boot() {
       model.state.settings.dailyNew = v;
       save();
       syncSettingsUI();
-      toast(v ? '每日新词改为 ' + v + ' 个，明天生效' : '已改为不限每日新词，明天生效');
+      toast(v ? '每日新词改为 ' + v + ' 个，重新打开后生效' : '已改为不限每日新词，重新打开后生效');
     });
   });
   document.querySelectorAll('[data-setting="fontSize"] .seg__btn').forEach(function (b) {
@@ -1207,7 +1060,7 @@ function boot() {
   $('moreBtn').addEventListener('click', function () { moreWords(20); });
   $('closeDone').addEventListener('click', function () { $('doneScreen').hidden = true; });
 
-  // 桌面端调试：↓ 下一个 / ↑ 上一个 / 空格朗读 / 1 忘了 2 收藏 3 记得
+  // 桌面端调试：↓ 下一个 / ↑ 上一个 / 空格朗读 / 2 收藏
   document.addEventListener('keydown', function (e) {
     if (e.target && /INPUT|TEXTAREA/.test(e.target.tagName)) return;
     if (e.key === ' ' || e.key === 'Enter') {
@@ -1218,12 +1071,10 @@ function boot() {
       e.preventDefault(); goTo(model.active + 1, true);
     } else if (e.key === 'ArrowUp') {
       e.preventDefault(); goTo(model.active - 1, true);
-    } else if (e.key === '1') { rate('again'); }
-    else if (e.key === '2') {
+    } else if (e.key === '2') {
       const el = model.cards[model.active];
       if (el) setFav(el.dataset.id, !(model.state.favs && model.state.favs[el.dataset.id]));
     }
-    else if (e.key === '3') { rate('good'); }
   });
 
   /* ---------- 启动 ---------- */
@@ -1258,18 +1109,13 @@ function boot() {
     // 跨天：只重置“今天”的计数，不动任何词的进度
     if (model.state.stats.lastDay !== model.today) {
       model.state.stats.lastDay = model.today;
-      model.state.stats.todayTotal = 0;
     }
 
-    // 队列照旧生成（复习词 + 新词），但会旋到上次看到的那张，
+    // 队列只放还没滑过的词，并旋到上次看到的那张，
     // 这样第二天打开也是「接着上次」，而不是从词库第一个词重新开始。
     const built = buildTodayQueue();
     model.queue = built.queue;
-    model.resumeStart = built.start;
     model.resumed = built.resumed;
-    if (!model.state.stats.todayTotal) {
-      model.state.stats.todayTotal = model.queue.length + countDoneToday(model.state, model.today);
-    }
     save();
 
     syncSettingsUI();
@@ -1288,15 +1134,15 @@ function boot() {
 
     renderChunk();
     model.active = 0;
-    updateKeys();
+    updateFavKey();
     applyPos(0, false);
     savePosNow();
     speakCurrent();
     // 续刷时给个明确提示：不是从头开始，是接上次
     if (model.resumed) {
-      const learned = learnedCount();
+      const learned = learnedCount(model.state);
       toast(learned > 0
-        ? ('接着上次的位置继续 · 已学 ' + learned + ' 词')
+        ? ('接着上次的位置继续 · 已滑过 ' + learned + ' 词')
         : '接着上次的位置继续', 2600);
     }
   }
@@ -1315,17 +1161,14 @@ if (typeof document !== 'undefined') {
 /* 供 Node 测试使用（浏览器里 module 不存在，不会执行） */
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    STEPS: STEPS,
     todayStr: todayStr,
     addDays: addDays,
-    intervalOf: intervalOf,
-    ratingToStage: ratingToStage,
-    applyRating: applyRating,
+    markLearned: markLearned,
     markStudy: markStudy,
+    learnedCount: learnedCount,
     buildQueue: buildQueue,
     rotateQueue: rotateQueue,
     nextFreshIds: nextFreshIds,
-    countDue: countDue,
     countDoneToday: countDoneToday,
     validateWords: validateWords,
     defaultState: defaultState

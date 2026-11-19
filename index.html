@@ -5,19 +5,19 @@
   <meta name="viewport"
         content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
   <meta name="theme-color" content="#0E0F13" />
-  <meta name="description" content="像刷短视频一样背六级单词：一屏一词，上下滑，先自测再翻面。" />
+  <meta name="description" content="像刷短视频一样背六级单词：一屏一词，上下滑，滑过就算背过。" />
   <meta name="format-detection" content="telephone=no" />
   <title>刷六级 · 一屏一词</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%230E0F13'/%3E%3Ctext x='50' y='74' font-size='64' text-anchor='middle' fill='%23F2F3F5' font-family='Microsoft YaHei,sans-serif'%3E%E5%85%AD%3C/text%3E%3C/svg%3E" />
-  <link rel="stylesheet" href="style.css?v=20261119b" />
+  <link rel="stylesheet" href="style.css?v=20261119c" />
 </head>
 <body data-fs="m">
 
-  <!-- 顶部：学习进度条 + 已背/总数 + 今日 + 收藏表入口 -->
+  <!-- 顶部：学习进度条 + 已滑过/总数 + 今日 + 收藏表入口 -->
   <header class="topbar">
     <div class="progress"><div class="progress__fill" id="progressFill"></div></div>
     <div class="topbar__row">
-      <span id="dayLabel">0 / 0</span>
+      <span id="dayLabel">已滑过 0 / 0</span>
       <span id="countLabel">今日 0</span>
       <button class="fav-count" id="favCountBtn" aria-label="已收藏单词表">★ <span id="favCount">0</span></button>
       <button class="gear" id="gearBtn" aria-label="设置">⚙︎</button>
@@ -31,12 +31,10 @@
     <div class="track" id="track"></div>
   </main>
 
-  <!-- 底部三键：记得 / 收藏 / 忘了 -->
+  <!-- 底部：只留收藏。滑过就算背过，不再有「记得 / 忘了」 -->
   <footer class="actionbar">
-    <div class="keys is-locked" id="keys">
-      <button class="key key--good" data-rating="good" disabled>记得</button>
-      <button class="key key--fav" id="favKey" data-action="fav" disabled>☆ 收藏</button>
-      <button class="key key--again" data-rating="again" disabled>忘了</button>
+    <div class="keys" id="keys">
+      <button class="key key--fav" id="favKey" data-action="fav">☆ 收藏</button>
     </div>
   </footer>
 
@@ -44,11 +42,11 @@
   <div class="screen done" id="doneScreen" hidden>
     <div class="done__inner">
       <div class="done__badge">✓</div>
-      <h1 class="done__title">今天的词刷完了</h1>
+      <h1 class="done__title" id="doneTitle">这一轮刷完了</h1>
       <div class="done__grid">
-        <div><b id="doneCount">0</b><span>今日张数</span></div>
+        <div><b id="doneCount">0</b><span>今日滑过</span></div>
         <div><b id="doneStreak">0</b><span>连续天数</span></div>
-        <div><b id="doneDue">0</b><span>明天复习</span></div>
+        <div><b id="doneLeft">0</b><span>剩余词数</span></div>
       </div>
       <p class="done__tip" id="doneTip"></p>
       <button class="btn btn--primary" id="moreBtn">再学 20 个新词</button>
@@ -80,7 +78,7 @@
       </div>
 
       <div class="field" data-setting="dailyNew">
-        <label>每日新词（0 = 不限，明天生效）</label>
+        <label>每日新词（0 = 不限，重新打开后生效）</label>
         <div class="seg">
           <button class="seg__btn" data-value="0">不限</button>
           <button class="seg__btn" data-value="10">10</button>
@@ -133,6 +131,6 @@
   <input type="file" id="importFile" accept="application/json,.json" hidden />
 
   <script src="words.js"></script>
-  <script src="app.js?v=20261119b"></script>
+  <script src="app.js?v=20261119c"></script>
 </body>
 </html>

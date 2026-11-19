@@ -22,6 +22,9 @@
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 
+/* hidden 属性优先于 .btn / .screen 等自带 display 的元素，否则「隐藏」不生效 */
+[hidden] { display: none !important; }
+
 html { -webkit-text-size-adjust: 100%; }
 
 html, body {
@@ -148,6 +151,7 @@ body[data-fs="l"] { --fs: 1.12; }
   overscroll-behavior: contain;
 }
 
+/* ---- 卡片正文 ---- */
 .card__head {
   display: flex;
   align-items: center;
@@ -211,32 +215,7 @@ body[data-fs="l"] { --fs: 1.12; }
   color: #7c8494;
 }
 
-/* ---- 已评标记：跟在单词右边 ---- */
-.card__flag {
-  flex: 0 0 auto;
-  font-size: 12px;
-  line-height: 1;
-  padding: 5px 9px;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  background: #1b1e26;
-  color: var(--dim);
-  opacity: 0;
-  transition: opacity 0.2s ease;
-  white-space: nowrap;
-}
-
-.card__flag:empty { display: none; }
-.card.is-rated .card__flag { opacity: 1; }
-.card.is-rated .card__body { opacity: 0.78; }
-/* 未评分但已经学过：标一个「复习」，免得用户以为又从第一个词重新开始了 */
-.card.is-review .card__flag { opacity: 0.8; }
-
-.flag-again .card__flag { color: var(--red); border-color: #3a2228; background: #221a1d; }
-.flag-hard .card__flag { color: var(--amber); border-color: #3a3222; background: #221f17; }
-.flag-good .card__flag { color: var(--green); border-color: #1f3a2c; background: #16221b; }
-
-/* ---------------- 底部三键 ---------------- */
+/* ---------------- 底部收藏 ---------------- */
 .actionbar {
   position: fixed;
   left: 0;
@@ -249,8 +228,10 @@ body[data-fs="l"] { --fs: 1.12; }
 
 .keys {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: 1fr;
   gap: 10px;
+  max-width: 220px;
+  margin: 0 auto;
 }
 
 .key {
@@ -268,12 +249,8 @@ body[data-fs="l"] { --fs: 1.12; }
 
 .key:active { transform: scale(0.97); }
 
-.key--again { color: var(--red); border-color: #3a2228; background: #221a1d; }
 .key--fav { color: var(--amber); border-color: #3a3222; background: #221f17; }
 .key--fav.is-on { color: #ffd166; border-color: #4a3b18; background: #241f12; }
-.key--good { color: var(--green); border-color: #1f3a2c; background: #16221b; }
-
-.keys.is-locked .key { opacity: 0.32; }
 
 /* ---------------- 完成页 ---------------- */
 .screen {
